@@ -154,10 +154,12 @@ setup_user() {
     mkdir -p "${INCUSBOX_CONTAINER_HOME}"
     chown "${INCUSBOX_HOST_UID}:${INCUSBOX_HOST_GID}" "${INCUSBOX_CONTAINER_HOME}" || true
 
-    # NOPASSWD sudo
+    # NOPASSWD sudo — create sudoers.d if it doesn't exist (Alpine omits it)
     local sudoers_file="/etc/sudoers.d/incusbox-${INCUSBOX_HOST_USER}"
-    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${INCUSBOX_HOST_USER}" > "${sudoers_file}"
-    chmod 0440 "${sudoers_file}"
+    mkdir -p /etc/sudoers.d
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${INCUSBOX_HOST_USER}" > "${sudoers_file}" \
+        2>/dev/null || log "Warning: could not write sudoers file (continuing)"
+    chmod 0440 "${sudoers_file}" 2>/dev/null || true
 
     # Also add to wheel/sudo groups if they exist
     for grp in sudo wheel adm; do

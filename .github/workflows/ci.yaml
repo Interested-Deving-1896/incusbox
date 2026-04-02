@@ -46,10 +46,13 @@ jobs:
             # SC1091: not following sourced file — expected (config files)
             # SC2034: unused variable — some vars set for sourcing by config
             # SC2154: referenced but not assigned — vars come from sourced config
+            # Use the shebang to determine shell dialect
+            shell="bash"
+            head -1 "$f" | grep -q '#!/bin/sh' && shell="sh"
             if shellcheck \
-                --shell=bash \
+                --shell="${shell}" \
                 --severity=warning \
-                --exclude=SC1090,SC1091,SC2034,SC2154 \
+                --exclude=SC1090,SC1091,SC2034,SC2154,SC3043 \
                 "$f"; then
               echo "OK:   $f"
             else
