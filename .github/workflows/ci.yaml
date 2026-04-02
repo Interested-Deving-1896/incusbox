@@ -458,45 +458,53 @@ jobs:
           user="$(id -run)"
           home="${HOME}"
 
-          # Encode incusbox-init as base64 for embedding in cloud-init write_files
+          # Encode incusbox-init as base64 for cloud-init write_files
           init_b64="$(base64 -w0 incusbox/incusbox-init)"
 
-          # Build cloud-init user-data — mirrors what incusbox-create generates
+          # Write cloud-init YAML at column 0 — indented heredocs produce
+          # leading spaces that break YAML parsing inside Incus.
           cat > /tmp/cloud-init.yaml << EOF
-          #cloud-config
-          write_files:
-          - path: /etc/incusbox-container
-            permissions: '0644'
-            content: |
-              INCUSBOX_CONTAINER_NAME=ci-debian
-              INCUSBOX_HOST_USER=${user}
-              INCUSBOX_HOST_UID=${uid}
-              INCUSBOX_HOST_GID=${gid}
-              INCUSBOX_HOST_HOME=${home}
-              INCUSBOX_CONTAINER_HOME=${home}
-              INCUSBOX_ADDITIONAL_PACKAGES=
-              INCUSBOX_PRE_INIT_HOOK=
-              INCUSBOX_INIT_HOOK=
-              INCUSBOX_INIT=0
-              INCUSBOX_NVIDIA=0
-          - path: /usr/local/bin/incusbox-init
-            permissions: '0755'
-            encoding: b64
-            content: ${init_b64}
-          runcmd:
-          - [sh, /usr/local/bin/incusbox-init]
-          EOF
+#cloud-config
+write_files:
+- path: /etc/incusbox-container
+  permissions: '0644'
+  content: |
+    INCUSBOX_CONTAINER_NAME=ci-debian
+    INCUSBOX_HOST_USER=${user}
+    INCUSBOX_HOST_UID=${uid}
+    INCUSBOX_HOST_GID=${gid}
+    INCUSBOX_HOST_HOME=${home}
+    INCUSBOX_CONTAINER_HOME=${home}
+    INCUSBOX_ADDITIONAL_PACKAGES=
+    INCUSBOX_PRE_INIT_HOOK=
+    INCUSBOX_INIT_HOOK=
+    INCUSBOX_INIT=0
+    INCUSBOX_NVIDIA=0
+- path: /usr/local/bin/incusbox-init
+  permissions: '0755'
+  encoding: b64
+  content: ${init_b64}
+runcmd:
+- [sh, /usr/local/bin/incusbox-init]
+EOF
+
+          # Write raw.idmap to a temp file — avoids shell quoting issues with
+          # embedded newlines when passing multiline values to incus config set.
+          printf 'uid %s %s\ngid %s %s\n' \
+            "${uid}" "${uid}" "${gid}" "${gid}" > /tmp/idmap.txt
 
           sudo incus launch local:ci-debian ci-debian \
             --profile incusbox-base \
             --storage default \
             --config user.manager=incusbox \
-            --config "raw.idmap=uid ${uid} ${uid}
-          gid ${gid} ${gid}" \
             --config "raw.lxc=lxc.apparmor.profile = unconfined
-          lxc.cap.drop =
-          lxc.cgroup.devices.allow = a" \
+lxc.cap.drop =
+lxc.cgroup.devices.allow = a" \
             --config "cloud-init.user-data=$(cat /tmp/cloud-init.yaml)"
+
+          # Set raw.idmap after launch via file to avoid newline quoting issues
+          sudo incus config set ci-debian raw.idmap="$(cat /tmp/idmap.txt)"
+
           sudo incus config device add ci-debian eth0 nic \
             nictype=bridged parent=incusbr0 name=eth0
           sudo incus config device add ci-debian home disk \
