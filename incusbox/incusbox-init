@@ -92,19 +92,23 @@ pkg_update() {
 # ── core dependency packages ──────────────────────────────────────────────────
 # Minimal set needed for incusbox to function inside any container.
 core_packages() {
+    # fuse-overlayfs is included for rootless container storage (avoids the
+    # 10+ minute recursive chown penalty with rootless Podman/Docker).
+    # See: podclaw NOTES.md — "fuse-overlayfs is critical for rootless"
     case "${DISTRO}" in
         ubuntu|debian|linuxmint|pop)
-            printf 'sudo bash curl wget less procps passwd util-linux' ;;
+            printf 'sudo bash curl wget less procps passwd util-linux fuse-overlayfs' ;;
         fedora|rhel|centos|almalinux|rocky)
-            printf 'sudo bash curl wget less procps-ng shadow-utils util-linux' ;;
+            printf 'sudo bash curl wget less procps-ng shadow-utils util-linux fuse-overlayfs' ;;
         arch|manjaro|endeavouros)
-            printf 'sudo bash curl wget less procps-ng shadow util-linux' ;;
+            printf 'sudo bash curl wget less procps-ng shadow util-linux fuse-overlayfs' ;;
         alpine)
-            printf 'sudo bash curl wget less procps shadow util-linux' ;;
+            # fuse-overlayfs not in Alpine repos; use fuse3 + overlay via kernel
+            printf 'sudo bash curl wget less procps shadow util-linux fuse3' ;;
         opensuse*|sles)
-            printf 'sudo bash curl wget less procps shadow util-linux' ;;
+            printf 'sudo bash curl wget less procps shadow util-linux fuse-overlayfs' ;;
         void)
-            printf 'sudo bash curl wget less procps shadow util-linux' ;;
+            printf 'sudo bash curl wget less procps shadow util-linux fuse-overlayfs' ;;
         *)
             printf 'sudo bash' ;;
     esac

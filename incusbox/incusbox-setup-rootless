@@ -1,0 +1,281 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-setup-rootless: guided setup for rootless incusbox via incus-user.
+#
+# Checks and configures:
+#   1. incus-user daemon (systemd user service)
+#   2. AppArmor userns profiles (Ubuntu 24.04+ restriction)
+#   3. /dev/fuse access (fuse-overlayfs for rootless storage)
+#   4. UID/GID subuid/subgid delegation
+#   5. incusbox-rootless Incus profile registration
+#
+# Pattern derived from podclaw NOTES.md and blincus setup scripts.
+
+set -e
+
+[ -z "${USER}" ] && USER="$(id -run)"
+[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+
+version="0.1.0"
+non_interactive=0
+verbose=0
+fix=0   # when 1, attempt to fix issues automatically
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+log()     { printf '%s\n' "$*"; }
+info()    { [ "${verbose}" -eq 1 ] && printf '  %s\n' "$*"; }
+ok()      { printf '  \033[32m✔\033[0m  %s\n' "$*"; }
+warn()    { printf '  \033[33m⚠\033[0m  %s\n' "$*"; }
+fail()    { printf '  \033[31m✘\033[0m  %s\n' "$*"; }
+die()     { printf 'Error: %s\n' "$*" >&2; exit 1; }
+section() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+
+show_help() {
+    cat <<EOF
+incusbox-setup-rootless version: ${version}
+
+Checks and configures the system for rootless incusbox operation.
+
+Usage:
+  incusbox-setup-rootless [OPTIONS]
+
+Options:
+  --fix          Attempt to automatically fix detected issues
+  -Y, --yes      Non-interactive (implies --fix)
+  -v, --verbose  Show verbose output
+  -V, --version  Show version
+  -h, --help     Show this help
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --fix)        fix=1;                      shift ;;
+        -Y|--yes)     non_interactive=1; fix=1;   shift ;;
+        -v|--verbose) verbose=1;                  shift ;;
+        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)    show_help; exit 0 ;;
+        *) die "Unknown option: $1" ;;
+    esac
+done
+
+issues=0
+
+ask_fix() {
+    local msg="$1"
+    local cmd="$2"
+    if [ "${fix}" -eq 1 ]; then
+        log "    Fixing: ${msg}"
+        eval "${cmd}" && ok "Fixed: ${msg}" || { fail "Failed to fix: ${msg}"; issues=$((issues+1)); }
+    else
+        warn "${msg}"
+        log "    Run: ${cmd}"
+        issues=$((issues+1))
+    fi
+}
+
+# ── 1. Must not be root ───────────────────────────────────────────────────────
+section "1. User check"
+if [ "$(id -ru)" -eq 0 ]; then
+    die "Run this script as a regular user, not root."
+fi
+ok "Running as ${USER} (uid=$(id -ru))"
+
+# ── 2. incus-user daemon ──────────────────────────────────────────────────────
+section "2. incus-user daemon"
+
+if ! command -v incus >/dev/null 2>&1; then
+    fail "incus not found in PATH"
+    log "    Install Incus: https://linuxcontainers.org/incus/docs/main/installing/"
+    issues=$((issues+1))
+else
+    ok "incus found: $(incus --version 2>/dev/null || true)"
+fi
+
+# Check incus-user socket
+INCUS_USER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -ru)}/incus/incus.socket"
+if [ -S "${INCUS_USER_SOCKET}" ]; then
+    ok "incus-user socket: ${INCUS_USER_SOCKET}"
+else
+    warn "incus-user socket not found at ${INCUS_USER_SOCKET}"
+    # Check if the systemd user service exists
+    if systemctl --user list-unit-files incus-user.service >/dev/null 2>&1; then
+        if systemctl --user is-active incus-user.service >/dev/null 2>&1; then
+            warn "incus-user.service is active but socket not found — check service logs"
+            log "    Run: systemctl --user status incus-user.service"
+        else
+            ask_fix \
+                "Start and enable incus-user.service" \
+                "systemctl --user enable --now incus-user.service"
+        fi
+    else
+        fail "incus-user.service not found"
+        log "    Install incus-user: https://linuxcontainers.org/incus/docs/main/installing/"
+        issues=$((issues+1))
+    fi
+fi
+
+# ── 3. subuid / subgid delegation ────────────────────────────────────────────
+section "3. UID/GID delegation (subuid/subgid)"
+
+check_subid() {
+    local file="$1"
+    local label="$2"
+    if grep -q "^${USER}:" "${file}" 2>/dev/null || \
+       grep -q "^${USER} " "${file}" 2>/dev/null; then
+        local range
+        range="$(grep "^${USER}" "${file}" | head -1)"
+        ok "${label}: ${range}"
+    else
+        ask_fix \
+            "Add ${USER} to ${file}" \
+            "sudo usermod --add-sub${label,,}s 65536-131071 ${USER}"
+    fi
+}
+
+check_subid /etc/subuid "subuid"
+check_subid /etc/subgid "subgid"
+
+# ── 4. AppArmor userns restriction (Ubuntu 24.04+) ───────────────────────────
+section "4. AppArmor unprivileged user namespace restriction"
+
+APPARMOR_USERNS_RESTRICT="/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+if [ -f "${APPARMOR_USERNS_RESTRICT}" ]; then
+    restrict_val="$(cat "${APPARMOR_USERNS_RESTRICT}")"
+    if [ "${restrict_val}" = "1" ]; then
+        warn "AppArmor restricts unprivileged user namespaces (value=1)"
+        log "    This blocks rootless Podman/Docker inside the container."
+        log "    The incusbox-rootless profile sets lxc.apparmor.profile=unconfined"
+        log "    which bypasses this for incusbox containers specifically."
+        log "    No system-wide change needed — the profile handles it."
+        ok "Handled by incusbox-rootless profile (lxc.apparmor.profile=unconfined)"
+    else
+        ok "AppArmor userns restriction: disabled (value=${restrict_val})"
+    fi
+else
+    ok "AppArmor userns restriction: not present on this kernel"
+fi
+
+# Check AppArmor profiles for rootless Podman tools (from podclaw)
+# These are needed if users run Podman inside the incusbox container.
+section "4b. AppArmor profiles for nested container tools"
+APPARMOR_D="/etc/apparmor.d"
+for tool in podman conmon crun slirp4netns pasta; do
+    if [ -f "${APPARMOR_D}/${tool}" ] || \
+       [ -f "${APPARMOR_D}/abstractions/${tool}" ]; then
+        ok "AppArmor profile found: ${tool}"
+    else
+        warn "AppArmor profile not found for ${tool}"
+        log "    Only needed if you run rootless Podman inside incusbox containers."
+        log "    Install: sudo apt-get install apparmor-profiles apparmor-profiles-extra"
+    fi
+done
+
+# ── 5. /dev/fuse access ───────────────────────────────────────────────────────
+section "5. /dev/fuse access (fuse-overlayfs)"
+
+if [ -c /dev/fuse ]; then
+    # Check if the current user can access it
+    if [ -r /dev/fuse ] && [ -w /dev/fuse ]; then
+        ok "/dev/fuse is accessible"
+    else
+        fuse_group="$(stat -c '%G' /dev/fuse 2>/dev/null || true)"
+        if id -nG "${USER}" | grep -qw "${fuse_group}"; then
+            ok "/dev/fuse accessible via group ${fuse_group}"
+        else
+            ask_fix \
+                "Add ${USER} to ${fuse_group} group for /dev/fuse access" \
+                "sudo usermod -aG ${fuse_group} ${USER} && newgrp ${fuse_group}"
+        fi
+    fi
+else
+    fail "/dev/fuse not found — fuse kernel module may not be loaded"
+    ask_fix \
+        "Load fuse kernel module" \
+        "sudo modprobe fuse && sudo modprobe -r fuse || true"
+fi
+
+# Check fuse-overlayfs is available inside containers
+# (it needs to be installed in the container image, not the host)
+log "    Note: fuse-overlayfs must be installed inside the container image."
+log "    incusbox-init installs it automatically for supported distros."
+
+# ── 6. incusbox-rootless Incus profile ───────────────────────────────────────
+section "6. incusbox-rootless Incus profile"
+
+INCUS_CMD="incus"
+# Use incus-user socket if available
+if [ -S "${INCUS_USER_SOCKET}" ]; then
+    export INCUS_SOCKET="${INCUS_USER_SOCKET}"
+fi
+
+if ${INCUS_CMD} profile show incusbox-rootless >/dev/null 2>&1; then
+    ok "incusbox-rootless profile registered"
+else
+    # Find the profile YAML
+    profile_yaml=""
+    for search in \
+        "$(dirname "$0")/profiles/incusbox-rootless.yaml" \
+        "${HOME}/.local/share/incusbox/profiles/incusbox-rootless.yaml" \
+        "/usr/local/share/incusbox/profiles/incusbox-rootless.yaml" \
+        "/usr/share/incusbox/profiles/incusbox-rootless.yaml"; do
+        [ -f "${search}" ] && profile_yaml="${search}" && break
+    done
+
+    if [ -n "${profile_yaml}" ]; then
+        ask_fix \
+            "Register incusbox-rootless profile" \
+            "${INCUS_CMD} profile create incusbox-rootless < ${profile_yaml}"
+    else
+        warn "incusbox-rootless profile not registered and YAML not found"
+        log "    Run: incusbox install --user  to install profiles"
+        issues=$((issues+1))
+    fi
+fi
+
+# ── 7. OCI remote registration ────────────────────────────────────────────────
+section "7. OCI remotes"
+
+for remote in docker ghcr quay; do
+    if ${INCUS_CMD} remote list --format csv 2>/dev/null | grep -q "^${remote},"; then
+        ok "Remote registered: ${remote}"
+    else
+        case "${remote}" in
+            docker) url="https://docker.io" ;;
+            ghcr)   url="https://ghcr.io" ;;
+            quay)   url="https://quay.io" ;;
+        esac
+        ask_fix \
+            "Register OCI remote: ${remote} (${url})" \
+            "${INCUS_CMD} remote add ${remote} ${url} --protocol=oci --accept-certificate"
+    fi
+done
+
+# ── 8. skopeo ─────────────────────────────────────────────────────────────────
+section "8. skopeo (OCI image pull)"
+
+if command -v skopeo >/dev/null 2>&1; then
+    ok "skopeo found: $(skopeo --version 2>/dev/null | head -1)"
+else
+    ask_fix \
+        "Install skopeo" \
+        "sudo apt-get install -y skopeo 2>/dev/null || sudo dnf install -y skopeo 2>/dev/null || sudo pacman -Sy --noconfirm skopeo 2>/dev/null || true"
+fi
+
+# ── summary ───────────────────────────────────────────────────────────────────
+printf '\n'
+if [ "${issues}" -eq 0 ]; then
+    printf '\033[32mAll checks passed. Rootless incusbox is ready.\033[0m\n\n'
+    printf 'Quick start:\n'
+    printf '  incusbox create --image docker:ubuntu:22.04 --name mybox\n'
+    printf '  incusbox enter mybox\n'
+else
+    printf '\033[33m%d issue(s) found.\033[0m\n' "${issues}"
+    if [ "${fix}" -eq 0 ]; then
+        printf 'Re-run with --fix to attempt automatic fixes:\n'
+        printf '  incusbox-setup-rootless --fix\n'
+    else
+        printf 'Some issues could not be fixed automatically.\n'
+        printf 'Review the output above and resolve them manually.\n'
+    fi
+fi

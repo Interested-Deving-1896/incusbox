@@ -85,6 +85,8 @@ incusbox-list
 incusbox-rm
 incusbox-stop
 incusbox-upgrade
+incusbox-assemble
+incusbox-setup-rootless
 "
 
 for exe in ${executables}; do
@@ -96,6 +98,32 @@ for exe in ${executables}; do
         log "Warning: ${exe} not found in ${src_dir}, skipping"
     fi
 done
+
+# ── install shell completions ─────────────────────────────────────────────────
+bash_completion_dir=""
+zsh_completion_dir=""
+
+if [ "${user_install}" -eq 1 ]; then
+    bash_completion_dir="${HOME}/.local/share/bash-completion/completions"
+    zsh_completion_dir="${HOME}/.local/share/zsh/completions"
+else
+    bash_completion_dir="${prefix}/share/bash-completion/completions"
+    zsh_completion_dir="${prefix}/share/zsh/site-functions"
+fi
+
+if [ -f "${src_dir}/completions/incusbox.bash" ]; then
+    install -d "${bash_completion_dir}"
+    install -m 0644 "${src_dir}/completions/incusbox.bash" \
+        "${bash_completion_dir}/incusbox"
+    info "Installed bash completion: ${bash_completion_dir}/incusbox"
+fi
+
+if [ -f "${src_dir}/completions/incusbox.zsh" ]; then
+    install -d "${zsh_completion_dir}"
+    install -m 0644 "${src_dir}/completions/incusbox.zsh" \
+        "${zsh_completion_dir}/_incusbox"
+    info "Installed zsh completion: ${zsh_completion_dir}/_incusbox"
+fi
 
 # ── install data files ────────────────────────────────────────────────────────
 # incusbox-init is also installed to share_dir so incusbox-create can find it

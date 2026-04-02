@@ -56,10 +56,16 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+INCUS_USER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -ru)}/incus/incus.socket"
 if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
     INCUS="sudo incus"
+    unset INCUS_SOCKET
+elif [ "$(id -ru)" -ne 0 ] && [ -S "${INCUS_USER_SOCKET}" ]; then
+    INCUS="incus"
+    export INCUS_SOCKET="${INCUS_USER_SOCKET}"
 else
     INCUS="incus"
+    unset INCUS_SOCKET
 fi
 
 command -v incus >/dev/null 2>&1 || die "'incus' not found in PATH"

@@ -88,6 +88,10 @@ case "${cmd}" in
     stop)      run_subcommand stop      "$@" ;;
     upgrade)   run_subcommand upgrade   "$@" ;;
 
+    # Declarative config
+    assemble)       run_subcommand assemble       "$@" ;;
+    setup-rootless) run_subcommand setup-rootless "$@" ;;
+
     # In-container commands (also callable from host for scripting)
     export)    run_subcommand export    "$@" ;;
     host-exec) run_subcommand host-exec "$@" ;;

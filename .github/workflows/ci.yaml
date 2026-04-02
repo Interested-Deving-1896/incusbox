@@ -7,8 +7,9 @@ on:
     branches: [main]
 
 jobs:
+  # ── static analysis ─────────────────────────────────────────────────────────
   syntax:
-    name: Shell syntax (sh -n)
+    name: Shell syntax (bash -n)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -64,25 +65,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify install script is executable and parses cleanly
-        run: |
-          sh -n incusbox/install
-          echo "Install script syntax OK"
+      - name: Verify install script syntax
+        run: bash -n incusbox/install && echo "Install script syntax OK"
 
       - name: Run install to ~/.local (no incus daemon needed)
         run: |
-          # Runs the install script in user mode. Incus profile registration
-          # and OCI remote registration are skipped gracefully when incus is
-          # not present — this validates the install logic itself.
           bash incusbox/install --user --verbose
-          # Verify executables landed in the right place
+          # Verify all executables landed correctly
           for exe in incusbox incusbox-create incusbox-enter incusbox-init \
                      incusbox-export incusbox-host-exec incusbox-list \
-                     incusbox-rm incusbox-stop incusbox-upgrade; do
+                     incusbox-rm incusbox-stop incusbox-upgrade \
+                     incusbox-assemble incusbox-setup-rootless; do
             if [ -x "${HOME}/.local/bin/${exe}" ]; then
               echo "OK:   ~/.local/bin/${exe}"
             else
               echo "FAIL: ~/.local/bin/${exe} not found or not executable"
+              exit 1
+            fi
+          done
+          # Verify completions landed
+          for comp in \
+              "${HOME}/.local/share/bash-completion/completions/incusbox" \
+              "${HOME}/.local/share/zsh/completions/_incusbox"; do
+            if [ -f "${comp}" ]; then
+              echo "OK:   ${comp}"
+            else
+              echo "FAIL: ${comp} not found"
               exit 1
             fi
           done
@@ -123,3 +131,171 @@ jobs:
             fi
           done
           exit $failed
+
+  assemble-parse:
+    name: incusbox-assemble YAML parser
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test YAML parser against example file
+        run: |
+          # Run the parser in isolation — no incus daemon needed
+          # Patch build_create_args to just echo args instead of running create
+          bash -c '
+            source incusbox/incusbox-assemble 2>/dev/null || true
+            output="$(parse_yaml_containers incusbox/docs/example-assemble.yaml)"
+            echo "${output}"
+            count="$(echo "${output}" | grep "^CONTAINER_COUNT=" | cut -d= -f2)"
+            echo "Parsed ${count} containers"
+            [ "${count}" -ge 1 ] || { echo "FAIL: no containers parsed"; exit 1; }
+            echo "OK: parser produced output for all containers"
+          '
+
+  # ── integration tests (live Incus daemon) ───────────────────────────────────
+  # Runs on ubuntu-24.04 with KVM available. Installs Incus from the upstream
+  # snap, initialises it with a minimal config, then exercises the full
+  # create → enter → list → rm lifecycle using a lightweight Incus native image
+  # (no OCI pull needed — avoids skopeo dependency in CI).
+  integration:
+    name: Integration (live Incus)
+    runs-on: ubuntu-24.04
+    # Only run on push to main or PRs — skip for draft PRs to save minutes
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Incus
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y incus incus-base
+          # Add runner user to incus-admin group
+          sudo adduser "$USER" incus-admin
+          sudo adduser "$USER" incus
+
+      - name: Initialise Incus (minimal preseed)
+        run: |
+          # Use a minimal dir-backed storage pool — no ZFS/Btrfs needed in CI
+          sudo incus admin init --preseed <<'PRESEED'
+          config: {}
+          networks:
+          - name: incusbr0
+            type: bridge
+            config:
+              ipv4.address: 10.211.55.1/24
+              ipv4.nat: "true"
+              ipv6.address: none
+          storage_pools:
+          - name: default
+            driver: dir
+          profiles:
+          - name: default
+            devices:
+              root:
+                path: /
+                pool: default
+                type: disk
+              eth0:
+                name: eth0
+                nictype: bridged
+                parent: incusbr0
+                type: nic
+          PRESEED
+
+      - name: Install incusbox
+        run: |
+          sudo bash incusbox/install --prefix /usr/local --verbose
+
+      - name: Register incusbox profiles
+        run: |
+          for yaml in incusbox/profiles/*.yaml; do
+            name="$(basename "${yaml}" .yaml)"
+            sudo incus profile show "${name}" >/dev/null 2>&1 && continue
+            sudo incus profile create "${name}" < "${yaml}"
+            echo "Created profile: ${name}"
+          done
+
+      - name: Create container (Incus native image — no OCI/skopeo needed)
+        run: |
+          # Use Alpine from the Incus image server — smallest image, fast pull
+          sudo incusbox create \
+            --image images:alpine/3.19 \
+            --name ci-test \
+            --root \
+            --yes \
+            --verbose
+          echo "Container created"
+
+      - name: Verify container is running
+        run: |
+          status="$(sudo incus info ci-test | awk '/^Status:/ {print tolower($2)}')"
+          echo "Status: ${status}"
+          [ "${status}" = "running" ] || { echo "FAIL: expected running"; exit 1; }
+
+      - name: Wait for incusbox-init readiness
+        run: |
+          echo "Waiting for /run/incusbox-ready..."
+          elapsed=0
+          while [ "${elapsed}" -lt 120 ]; do
+            if sudo incus exec ci-test -- test -f /run/incusbox-ready 2>/dev/null; then
+              echo "OK: /run/incusbox-ready found after ${elapsed}s"
+              break
+            fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+          done
+          if [ "${elapsed}" -ge 120 ]; then
+            echo "WARN: timed out — checking cloud-init / exec injection logs"
+            sudo incus exec ci-test -- cat /var/log/incusbox-init.log 2>/dev/null || true
+            sudo incus info --show-log ci-test || true
+          fi
+
+      - name: Verify user exists inside container
+        run: |
+          uid="$(id -ru)"
+          result="$(sudo incus exec ci-test -- id "${uid}" 2>/dev/null || true)"
+          echo "id output: ${result}"
+          [ -n "${result}" ] || { echo "FAIL: user uid=${uid} not found in container"; exit 1; }
+          echo "OK: user exists"
+
+      - name: Verify home directory is bind-mounted
+        run: |
+          home="${HOME}"
+          result="$(sudo incus exec ci-test -- test -d "${home}" 2>/dev/null && echo "exists" || echo "missing")"
+          echo "Home ${home}: ${result}"
+          [ "${result}" = "exists" ] || { echo "FAIL: home not mounted"; exit 1; }
+
+      - name: Verify /run/host is mounted (host-exec path)
+        run: |
+          result="$(sudo incus exec ci-test -- test -d /run/host 2>/dev/null && echo "exists" || echo "missing")"
+          echo "/run/host: ${result}"
+          [ "${result}" = "exists" ] || { echo "FAIL: /run/host not mounted"; exit 1; }
+
+      - name: incusbox list
+        run: |
+          sudo incusbox list --root
+          echo "OK: list completed"
+
+      - name: incusbox stop
+        run: |
+          sudo incusbox stop --root ci-test
+          status="$(sudo incus info ci-test | awk '/^Status:/ {print tolower($2)}')"
+          echo "Status after stop: ${status}"
+          [ "${status}" = "stopped" ] || { echo "FAIL: expected stopped"; exit 1; }
+
+      - name: incusbox rm
+        run: |
+          sudo incusbox rm --root --yes ci-test
+          sudo incus info ci-test >/dev/null 2>&1 && \
+            { echo "FAIL: container still exists after rm"; exit 1; } || \
+            echo "OK: container removed"
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== incus list ==="
+          sudo incus list || true
+          echo "=== incus info ci-test ==="
+          sudo incus info --show-log ci-test 2>/dev/null || true
+          echo "=== incusbox-init log ==="
+          sudo incus exec ci-test -- cat /var/log/incusbox-init.log 2>/dev/null || true

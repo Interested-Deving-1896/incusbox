@@ -1,0 +1,330 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-assemble: create/update incusbox containers from a declarative YAML file.
+#
+# YAML schema (all fields except 'name' are optional):
+#
+#   containers:
+#     - name: mybox                        # container name (required)
+#       image: docker:ubuntu:22.04         # image reference
+#       hostname: mybox                    # hostname inside container
+#       home: /custom/home                 # custom home path
+#       home_prefix: /data/incusbox        # prefix for per-container homes
+#       additional_packages: git curl      # space-separated packages
+#       init_hooks: "cmd1 && cmd2"         # run after init
+#       pre_init_hooks: "cmd"              # run before init
+#       init: true                         # enable init system (systemd)
+#       nvidia: true                       # NVIDIA GPU passthrough
+#       storage_pool: tank                 # Incus storage pool
+#       storage_dataset: tank/incusbox     # ZFS dataset prefix
+#       btrfs_compress: zstd               # Btrfs compression
+#       root: false                        # rootful container
+#       unshare_netns: false               # isolate network namespace
+#       unshare_ipc: false                 # isolate IPC namespace
+#       unshare_process: false             # isolate PID namespace
+#       unshare_devsys: false              # isolate /dev and /sys
+#       unshare_groups: false              # drop supplementary groups
+#       volumes:                           # additional bind mounts
+#         - /host/path:/container/path
+#         - /host/path:/container/path:ro
+#       pull: false                        # always pull image
+
+set -e
+
+[ -z "${USER}" ] && USER="$(id -run)"
+[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+
+version="0.1.0"
+assemble_file=""
+non_interactive=0
+dryrun=0
+verbose=0
+replace=0
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+log()  { printf >&2 '%s\n' "$*"; }
+die()  { printf >&2 'Error: %s\n' "$*"; exit 1; }
+info() { [ "${verbose}" -eq 1 ] && printf >&2 '+ %s\n' "$*"; }
+
+show_help() {
+    cat <<EOF
+incusbox-assemble version: ${version}
+
+Create or update incusbox containers from a declarative YAML file.
+
+Usage:
+  incusbox-assemble [OPTIONS] --file FILE
+
+Options:
+  -f, --file FILE    YAML file describing containers (required)
+      --replace      Remove and recreate existing containers
+  -Y, --yes          Non-interactive
+  -d, --dry-run      Print commands without executing
+  -v, --verbose      Show verbose output
+  -V, --version      Show version
+  -h, --help         Show this help
+
+Example YAML:
+  containers:
+    - name: ubuntu-dev
+      image: docker:ubuntu:22.04
+      additional_packages: git curl build-essential
+    - name: fedora-tools
+      image: images:fedora/40
+      nvidia: true
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -f|--file)    assemble_file="$2"; shift 2 ;;
+        --replace)    replace=1;          shift ;;
+        -Y|--yes)     non_interactive=1;  shift ;;
+        -d|--dry-run) dryrun=1;           shift ;;
+        -v|--verbose) verbose=1;          shift ;;
+        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)    show_help; exit 0 ;;
+        *) die "Unknown option: $1" ;;
+    esac
+done
+
+[ -z "${assemble_file}" ] && die "--file is required"
+[ -f "${assemble_file}" ] || die "File not found: ${assemble_file}"
+
+# ── YAML parser ───────────────────────────────────────────────────────────────
+# Minimal line-by-line YAML parser sufficient for the incusbox-assemble schema.
+# Handles:
+#   - Top-level 'containers:' list
+#   - List items starting with '  - name: VALUE'
+#   - Key-value pairs: '    key: value'
+#   - Boolean values: true/false → 1/0
+#   - Sequence items under 'volumes:': '      - value'
+#
+# Does NOT handle: anchors, multi-line strings, nested maps beyond 2 levels.
+# For complex configs, use yq to pre-process the file.
+
+parse_yaml_containers() {
+    local file="$1"
+    local in_container=0
+    local in_volumes=0
+    local container_idx=0
+
+    # Output: one shell variable assignment per line, prefixed with container index
+    # e.g.: C0_name=mybox  C0_image=docker:ubuntu:22.04  C0_volumes="/a:/b /c:/d"
+
+    while IFS= read -r line; do
+        # Strip trailing whitespace
+        line="${line%"${line##*[![:space:]]}"}"
+
+        # Skip comments and empty lines
+        case "${line}" in
+            '#'*|'') continue ;;
+        esac
+
+        # Top-level containers: list start
+        if [ "${line}" = "containers:" ]; then
+            in_container=0
+            in_volumes=0
+            continue
+        fi
+
+        # New container list item: '  - name: VALUE'
+        if printf '%s' "${line}" | grep -qE '^\s+-\s+name:\s+'; then
+            in_container=1
+            in_volumes=0
+            container_idx=$((container_idx + 1))
+            local val
+            val="$(printf '%s' "${line}" | sed 's/.*name:[[:space:]]*//')"
+            printf 'C%d_name=%s\n' "$((container_idx - 1))" "${val}"
+            continue
+        fi
+
+        [ "${in_container}" -eq 0 ] && continue
+
+        local idx=$((container_idx - 1))
+
+        # volumes: sequence header
+        if printf '%s' "${line}" | grep -qE '^\s+volumes:\s*$'; then
+            in_volumes=1
+            continue
+        fi
+
+        # Volume sequence item: '      - /src:/dst'
+        if [ "${in_volumes}" -eq 1 ] && printf '%s' "${line}" | grep -qE '^\s+-\s+'; then
+            local vol
+            vol="$(printf '%s' "${line}" | sed 's/.*-[[:space:]]*//')"
+            # Append to existing volumes string
+            printf 'C%d_volumes_append=%s\n' "${idx}" "${vol}"
+            continue
+        fi
+
+        # Any non-volume key resets volumes mode
+        in_volumes=0
+
+        # Key: value pairs
+        if printf '%s' "${line}" | grep -qE '^\s+[a-z_]+:\s+'; then
+            local key val2
+            key="$(printf '%s' "${line}" | sed 's/[[:space:]]*//' | cut -d: -f1)"
+            val2="$(printf '%s' "${line}" | sed "s/.*${key}:[[:space:]]*//")"
+            # Normalise booleans
+            case "${val2}" in
+                true|True|TRUE)   val2=1 ;;
+                false|False|FALSE) val2=0 ;;
+            esac
+            printf 'C%d_%s=%s\n' "${idx}" "${key}" "${val2}"
+        fi
+    done < "${file}"
+
+    # Output total count
+    printf 'CONTAINER_COUNT=%d\n' "${container_idx}"
+}
+
+# ── build incusbox-create args from parsed container vars ─────────────────────
+build_create_args() {
+    local idx="$1"
+
+    # Load all C{idx}_* variables into local scope via eval
+    local name image hostname home home_prefix additional_packages
+    local init_hooks pre_init_hooks init nvidia storage_pool storage_dataset
+    local btrfs_compress root unshare_netns unshare_ipc unshare_process
+    local unshare_devsys unshare_groups pull
+
+    # shellcheck disable=SC2034
+    eval "$(set | grep "^C${idx}_" | sed "s/^C${idx}_//"  2>/dev/null || true)"
+
+    local args=""
+    [ -n "${name}" ]                 && args="${args} --name ${name}"
+    [ -n "${image}" ]                && args="${args} --image ${image}"
+    [ -n "${hostname}" ]             && args="${args} --hostname ${hostname}"
+    [ -n "${home}" ]                 && args="${args} --home ${home}"
+    [ -n "${home_prefix}" ]          && args="${args} --home-prefix ${home_prefix}"
+    [ -n "${additional_packages}" ]  && args="${args} --additional-packages '${additional_packages}'"
+    [ -n "${init_hooks}" ]           && args="${args} --init-hooks '${init_hooks}'"
+    [ -n "${pre_init_hooks}" ]       && args="${args} --pre-init-hooks '${pre_init_hooks}'"
+    [ "${init}" = "1" ]              && args="${args} --init"
+    [ "${nvidia}" = "1" ]            && args="${args} --nvidia"
+    [ -n "${storage_pool}" ]         && args="${args} --storage-pool ${storage_pool}"
+    [ -n "${storage_dataset}" ]      && args="${args} --storage-dataset ${storage_dataset}"
+    [ -n "${btrfs_compress}" ]       && args="${args} --btrfs-compress ${btrfs_compress}"
+    [ "${root}" = "1" ]              && args="${args} --root"
+    [ "${unshare_netns}" = "1" ]     && args="${args} --unshare-netns"
+    [ "${unshare_ipc}" = "1" ]       && args="${args} --unshare-ipc"
+    [ "${unshare_process}" = "1" ]   && args="${args} --unshare-process"
+    [ "${unshare_devsys}" = "1" ]    && args="${args} --unshare-devsys"
+    [ "${unshare_groups}" = "1" ]    && args="${args} --unshare-groups"
+    [ "${pull}" = "1" ]              && args="${args} --pull"
+    [ "${non_interactive}" -eq 1 ]   && args="${args} --yes"
+    [ "${dryrun}" -eq 1 ]            && args="${args} --dry-run"
+    [ "${verbose}" -eq 1 ]           && args="${args} --verbose"
+
+    # Volumes — stored as space-separated list in C{idx}_volumes
+    # (assembled from C{idx}_volumes_append lines during parsing)
+    local volumes_var="C${idx}_volumes"
+    local volumes="${!volumes_var}"
+    for vol in ${volumes}; do
+        args="${args} --volume ${vol}"
+    done
+
+    printf '%s' "${args}"
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+main() {
+    local create_cmd
+    create_cmd="$(dirname "$0")/incusbox-create"
+    [ -x "${create_cmd}" ] || create_cmd="$(command -v incusbox-create 2>/dev/null)" || \
+        die "incusbox-create not found"
+
+    # Parse the YAML file into shell variable assignments
+    local parsed_vars
+    parsed_vars="$(parse_yaml_containers "${assemble_file}")"
+
+    # Assemble volumes: merge C{idx}_volumes_append lines into C{idx}_volumes
+    local assembled_vars=""
+    local container_count=0
+    while IFS= read -r varline; do
+        case "${varline}" in
+            CONTAINER_COUNT=*)
+                container_count="${varline#CONTAINER_COUNT=}" ;;
+            *_volumes_append=*)
+                local idx_key val_append
+                idx_key="${varline%%_volumes_append=*}"
+                val_append="${varline#*_volumes_append=}"
+                local existing
+                existing="$(printf '%s' "${assembled_vars}" | grep "^${idx_key}_volumes=" | cut -d= -f2- || true)"
+                if [ -n "${existing}" ]; then
+                    assembled_vars="$(printf '%s' "${assembled_vars}" | grep -v "^${idx_key}_volumes=")"
+                    assembled_vars="${assembled_vars}
+${idx_key}_volumes=${existing} ${val_append}"
+                else
+                    assembled_vars="${assembled_vars}
+${idx_key}_volumes=${val_append}"
+                fi ;;
+            *)
+                assembled_vars="${assembled_vars}
+${varline}" ;;
+        esac
+    done <<< "${parsed_vars}"
+
+    # Export all parsed variables into the environment for build_create_args
+    while IFS= read -r varline; do
+        [ -z "${varline}" ] && continue
+        export "${varline?}"
+    done <<< "${assembled_vars}"
+
+    if [ "${container_count}" -eq 0 ]; then
+        die "No containers found in ${assemble_file}"
+    fi
+
+    log "Found ${container_count} container(s) in ${assemble_file}"
+
+    local i=0
+    while [ "${i}" -lt "${container_count}" ]; do
+        local name_var="C${i}_name"
+        local cname="${!name_var}"
+
+        if [ -z "${cname}" ]; then
+            log "Warning: container ${i} has no name, skipping"
+            i=$((i+1))
+            continue
+        fi
+
+        log ""
+        log "── Container: ${cname} ──"
+
+        # Handle --replace: remove existing container first
+        if [ "${replace}" -eq 1 ]; then
+            if incus info "${cname}" >/dev/null 2>&1; then
+                log "Removing existing container '${cname}' (--replace)"
+                if [ "${dryrun}" -eq 0 ]; then
+                    local rm_cmd
+                    rm_cmd="$(dirname "$0")/incusbox-rm"
+                    [ -x "${rm_cmd}" ] || rm_cmd="$(command -v incusbox-rm 2>/dev/null)" || rm_cmd="incusbox-rm"
+                    ${rm_cmd} --yes --force "${cname}" || true
+                else
+                    log "[dry-run] incusbox-rm --yes --force ${cname}"
+                fi
+            fi
+        fi
+
+        # Build and run create command
+        local create_args
+        create_args="$(build_create_args "${i}")"
+
+        if [ "${dryrun}" -eq 1 ]; then
+            log "[dry-run] ${create_cmd} ${create_args}"
+        else
+            info "Running: ${create_cmd} ${create_args}"
+            # shellcheck disable=SC2086
+            eval "${create_cmd} ${create_args}" || \
+                log "Warning: failed to create container '${cname}'"
+        fi
+
+        i=$((i+1))
+    done
+
+    log ""
+    log "Assembly complete."
+}
+
+main "$@"

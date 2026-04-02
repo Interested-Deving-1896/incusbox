@@ -1,0 +1,31 @@
+# incusbox-assemble example
+# Run with: incusbox-assemble --file example-assemble.yaml
+
+containers:
+  - name: ubuntu-dev
+    image: docker:ubuntu:22.04
+    additional_packages: git curl build-essential python3 python3-pip
+    init_hooks: "curl -fsSL https://get.docker.com | sh || true"
+
+  - name: fedora-tools
+    image: images:fedora/40
+    additional_packages: git gcc make
+    nvidia: true
+
+  - name: arch-gaming
+    image: docker:archlinux
+    init: true
+    storage_pool: default
+
+  - name: alpine-ci
+    image: docker:alpine:3.19
+    unshare_netns: true
+    unshare_process: true
+    additional_packages: bash git
+
+  - name: isolated-box
+    image: docker:debian:bookworm
+    unshare_all: true
+    volumes:
+      - /tmp/shared:/shared
+      - /home/user/projects:/projects:ro

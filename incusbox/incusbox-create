@@ -152,10 +152,22 @@ fi
 effective_home="${container_user_custom_home:-"${container_user_home}"}"
 
 # ── incus binary (rootful vs rootless) ───────────────────────────────────────
+# Rootless mode uses the incus-user per-user daemon socket. When the socket
+# exists we point INCUS_SOCKET at it so all incus calls use it automatically.
+# Rootful mode uses sudo when the caller is not already root.
+INCUS_USER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -ru)}/incus/incus.socket"
+
 if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
     INCUS="sudo incus"
+    unset INCUS_SOCKET
+elif [ "$(id -ru)" -ne 0 ] && [ -S "${INCUS_USER_SOCKET}" ]; then
+    # Rootless: use incus-user socket
+    INCUS="incus"
+    export INCUS_SOCKET="${INCUS_USER_SOCKET}"
+    info "Rootless mode: using incus-user socket ${INCUS_USER_SOCKET}"
 else
     INCUS="incus"
+    unset INCUS_SOCKET
 fi
 
 # ── storage detection ─────────────────────────────────────────────────────────
@@ -280,6 +292,11 @@ ensure_oci_remote() {
 # Profiles live in profiles/ and are applied in order.
 build_profile_list() {
     local profiles="incusbox-base"
+    # Rootless containers get the rootless profile (AppArmor unconfined +
+    # fuse-overlayfs) instead of the base profile's defaults.
+    if [ -n "${INCUS_SOCKET}" ] && [ "${rootful}" -eq 0 ]; then
+        profiles="incusbox-rootless"
+    fi
     [ "${init}" -eq 1 ]          && profiles="${profiles},incusbox-init"
     [ "${nvidia}" -eq 1 ]        && profiles="${profiles},incusbox-nvidia"
     [ "${unshare_netns}" -eq 1 ] && profiles="${profiles},incusbox-unshare-net"
@@ -474,30 +491,45 @@ configure_container() {
         environment.CONTAINER_ID="${container_name}" \
         environment.TERMINFO_DIRS="/usr/share/terminfo:/run/host/usr/share/terminfo"
 
-    # Hostname
+    # Kernel modules
     ${INCUS} config set "${name}" \
         "linux.kernel_modules=overlay,nf_nat,ip_tables,ip6_tables,netlink_diag,br_netfilter,xt_conntrack"
 
-    # PID namespace sharing (host process visibility) via raw.lxc
+    # ── raw.lxc — build all directives in one string, set in one call ─────────
+    # Each directive is conditionally appended. A single incus config set call
+    # is used to avoid the accumulation bug where multiple calls each overwrite
+    # the previous value.
+    local raw_lxc=""
+
+    # Base: drop AppArmor confinement and capability restrictions so the
+    # container can function as a development environment.
+    raw_lxc="lxc.apparmor.profile = unconfined
+lxc.cap.drop =
+lxc.cgroup.devices.allow = a"
+
+    # PID namespace sharing — lets the container see host processes.
+    # Skipped when --unshare-process is set.
     if [ "${unshare_process}" -eq 0 ]; then
-        ${INCUS} config set "${name}" \
-            raw.lxc="lxc.namespace.share.pid = 1"
+        raw_lxc="${raw_lxc}
+lxc.namespace.share.pid = 1"
     fi
 
-    # IPC namespace sharing
+    # IPC namespace sharing — shared memory segments with host.
+    # Skipped when --unshare-ipc is set.
     if [ "${unshare_ipc}" -eq 0 ]; then
-        current_raw
-        current_raw="$(${INCUS} config get "${name}" raw.lxc 2>/dev/null || true)"
-        ${INCUS} config set "${name}" \
-            raw.lxc="${current_raw}
+        raw_lxc="${raw_lxc}
 lxc.namespace.share.ipc = 1"
     fi
 
-    # Host network namespace
+    # Host network namespace — container uses host's network stack directly.
+    # Skipped when --unshare-netns is set (container gets its own NIC instead).
     if [ "${unshare_netns}" -eq 0 ]; then
-        ${INCUS} config set "${name}" raw.lxc="$(${INCUS} config get "${name}" raw.lxc 2>/dev/null)
+        raw_lxc="${raw_lxc}
 lxc.net.0.type = none"
     fi
+
+    # Apply all raw.lxc directives in a single config set call.
+    ${INCUS} config set "${name}" raw.lxc="${raw_lxc}"
 
     # Storage pool assignment
     if [ -n "${storage_pool}" ]; then
@@ -563,19 +595,11 @@ main() {
     local profiles
     profiles="$(build_profile_list)"
 
-    # Build launch command
-    local launch_cmd
-    launch_cmd="${INCUS} launch ${container_image} ${container_name}"
-    launch_cmd="${launch_cmd} --profile ${profiles}"
-    launch_cmd="${launch_cmd} --config=cloud-init.user-data=\"\$(cat ${cloud_init_file})\""
-    [ -n "${storage_pool}" ] && \
-        launch_cmd="${launch_cmd} --storage ${storage_pool}"
-    launch_cmd="${launch_cmd} ${container_manager_additional_flags}"
-
     if [ "${dryrun}" -eq 1 ]; then
-        log "[dry-run] ${launch_cmd}"
+        log "[dry-run] incus launch ${container_image} ${container_name} --profile ${profiles}"
         log "[dry-run] configure_devices ${container_name}"
         log "[dry-run] configure_container ${container_name}"
+        log "[dry-run] inject_init ${container_name}"
         rm -f "${cloud_init_file}"
         exit 0
     fi
@@ -600,8 +624,84 @@ main() {
     configure_devices "${container_name}"
     configure_container "${container_name}"
 
+    # Inject incusbox-init — use cloud-init if available, otherwise fall back
+    # to direct incus exec injection (for Alpine, Arch, minimal images, etc.)
+    inject_init "${container_name}"
+
     printf >&2 "Container '%s' created.\nTo enter, run:\n\n  incusbox enter %s\n\n" \
         "${container_name}" "${container_name}"
+}
+
+# ── init injection ────────────────────────────────────────────────────────────
+# Determines whether the container has cloud-init and chooses the injection
+# method accordingly.
+#
+# Method A (cloud-init): cloud-init.user-data was already passed at launch.
+#   We just need to wait — incusbox-enter polls /run/incusbox-ready.
+#
+# Method B (direct exec): For images without cloud-init (Alpine, Arch, minimal
+#   Ubuntu, etc.), copy incusbox-init into the container and run it directly
+#   via incus exec. This is less reliable on first-boot timing but works for
+#   any image.
+inject_init() {
+    local name="$1"
+
+    # Wait briefly for the container to reach running state
+    local attempts=0
+    while [ "${attempts}" -lt 15 ]; do
+        local status
+        status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
+        [ "${status}" = "running" ] && break
+        sleep 2
+        attempts=$((attempts + 1))
+    done
+
+    # Detect cloud-init presence inside the container
+    if ${INCUS} exec "${name}" -- \
+        sh -c 'command -v cloud-init >/dev/null 2>&1' 2>/dev/null; then
+        info "cloud-init detected — init will run via cloud-init user-data"
+        # cloud-init.user-data was already set at launch; nothing more to do here.
+        return 0
+    fi
+
+    # Fallback: direct exec injection
+    info "cloud-init not found — using direct exec injection"
+    printf >&2 "%-40s\t" "Injecting incusbox-init..."
+
+    local init_script_path
+    init_script_path="$(cd "$(dirname "$0")" && pwd)/incusbox-init"
+    [ -f "${init_script_path}" ] || init_script_path="/usr/share/incusbox/incusbox-init"
+    [ -f "${init_script_path}" ] || { printf >&2 '\033[31m[ ERR ]\033[0m\n'; die "incusbox-init not found"; }
+
+    # Copy the init script into the container
+    ${INCUS} file push "${init_script_path}" \
+        "${name}/usr/local/bin/incusbox-init" \
+        --mode 0755 2>/dev/null || \
+        die "Failed to push incusbox-init into container"
+
+    # Write the config file that incusbox-init reads
+    ${INCUS} exec "${name}" -- sh -c "cat > /etc/incusbox-container" <<CONF
+INCUSBOX_CONTAINER_NAME=${container_name}
+INCUSBOX_HOST_USER=${container_user_name}
+INCUSBOX_HOST_UID=${container_user_uid}
+INCUSBOX_HOST_GID=${container_user_gid}
+INCUSBOX_HOST_HOME=${container_user_home}
+INCUSBOX_CONTAINER_HOME=${effective_home}
+INCUSBOX_ADDITIONAL_PACKAGES=${container_additional_packages}
+INCUSBOX_PRE_INIT_HOOK=${container_pre_init_hook}
+INCUSBOX_INIT_HOOK=${container_init_hook}
+INCUSBOX_INIT=${init}
+INCUSBOX_NVIDIA=${nvidia}
+CONF
+
+    # Run incusbox-init in the background so this call returns immediately.
+    # incusbox-enter will poll /run/incusbox-ready as usual.
+    ${INCUS} exec "${name}" -- \
+        sh -c 'nohup /usr/local/bin/incusbox-init > /var/log/incusbox-init.log 2>&1 &' \
+        2>/dev/null || die "Failed to start incusbox-init in container"
+
+    printf >&2 '\033[32m[ OK ]\033[0m\n'
+    info "incusbox-init running in background — incusbox-enter will wait for /run/incusbox-ready"
 }
 
 main "$@"

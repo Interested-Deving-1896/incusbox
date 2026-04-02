@@ -83,11 +83,17 @@ done
 
 [ -z "${container_name}" ] && die "Container name required. Usage: incusbox enter NAME"
 
-# ── incus binary ──────────────────────────────────────────────────────────────
+# ── incus binary (rootful vs rootless) ───────────────────────────────────────
+INCUS_USER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -ru)}/incus/incus.socket"
 if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
     INCUS="sudo incus"
+    unset INCUS_SOCKET
+elif [ "$(id -ru)" -ne 0 ] && [ -S "${INCUS_USER_SOCKET}" ]; then
+    INCUS="incus"
+    export INCUS_SOCKET="${INCUS_USER_SOCKET}"
 else
     INCUS="incus"
+    unset INCUS_SOCKET
 fi
 
 # ── container state helpers ───────────────────────────────────────────────────
@@ -207,6 +213,8 @@ ensure_running() {
 }
 
 # ── build exec command ────────────────────────────────────────────────────────
+# Called after container metadata has been read into:
+#   container_home, container_user_uid, container_user_gid
 build_exec_cmd() {
     local exec_args=""
 
@@ -217,13 +225,13 @@ build_exec_cmd() {
         exec_args="--force-noninteractive"
     fi
 
-    # Run as the correct user
-    exec_args="${exec_args} --user ${container_user_uid:-$(id -ru)}"
-    exec_args="${exec_args} --group ${container_user_gid:-$(id -rg)}"
-    exec_args="${exec_args} --cwd ${container_home:-${HOME}}"
+    # Run as the correct user — metadata vars are populated before this call
+    exec_args="${exec_args} --user ${container_user_uid}"
+    exec_args="${exec_args} --group ${container_user_gid}"
+    exec_args="${exec_args} --cwd ${container_home}"
 
     # Environment
-    exec_args="${exec_args} --env HOME=${container_home:-${HOME}}"
+    exec_args="${exec_args} --env HOME=${container_home}"
     exec_args="${exec_args} --env SHELL=$(basename "${SHELL:-/bin/bash}")"
     exec_args="${exec_args} --env CONTAINER_ID=${container_name}"
     exec_args="${exec_args} --env INCUSBOX=1"
@@ -235,28 +243,28 @@ build_exec_cmd() {
 main() {
     command -v incus >/dev/null 2>&1 || die "'incus' not found in PATH"
 
-    # Ensure container is running
-    ensure_running
-
-    # Read container metadata
-    container_home="$(container_config container_home)"
-    container_user_uid="$(container_config host_uid)"
-    container_user_gid="$(container_config host_gid)"
-    unshare_groups="$(container_config unshare_groups)"
+    # Read container metadata first so --dry-run and build_exec_cmd both have
+    # correct values regardless of whether the container is running.
+    # Fall back to host values when the container doesn't exist yet.
+    container_home="$(container_config container_home 2>/dev/null || true)"
+    container_user_uid="$(container_config host_uid 2>/dev/null || true)"
+    container_user_gid="$(container_config host_gid 2>/dev/null || true)"
+    unshare_groups="$(container_config unshare_groups 2>/dev/null || true)"
 
     [ -z "${container_home}" ]     && container_home="${HOME}"
     [ -z "${container_user_uid}" ] && container_user_uid="$(id -ru)"
     [ -z "${container_user_gid}" ] && container_user_gid="$(id -rg)"
 
-    # Build exec args
+    # Build exec args now that metadata is populated
     local exec_args
     exec_args="$(build_exec_cmd)"
 
-    # Determine the command to run inside the container
-    # If no command given, launch the user's login shell
-    local inner_cmd
+    # Determine the inner command (login shell if none given)
+    # Done before ensure_running so --dry-run can print the full command
+    # without needing a live container.
+    local inner_cmd=""
     if [ "$#" -eq 0 ]; then
-        # Get the user's shell from inside the container
+        # Best-effort: read shell from container if running, else use host shell
         inner_cmd="$(${INCUS} exec "${container_name}" -- \
             getent passwd "${container_command_user}" 2>/dev/null \
             | cut -d: -f7 || true)"
@@ -269,10 +277,14 @@ main() {
         set -- su -m "${container_command_user}" -s /bin/sh -c '"$0" "$@"' -- "$@"
     fi
 
+    # --dry-run: print the full command and exit without touching the container
     if [ "${dryrun}" -eq 1 ]; then
         log "[dry-run] ${INCUS} exec ${exec_args} ${container_name} -- $*"
         exit 0
     fi
+
+    # Ensure container is running (starts it or creates it if needed)
+    ensure_running
 
     # Execute — use exec to replace this shell process
     # shellcheck disable=SC2086
