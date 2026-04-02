@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-host-exec: execute a command on the host from inside an incusbox container.
 # Adapted from distrobox-host-exec.
