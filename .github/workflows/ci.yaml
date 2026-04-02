@@ -221,20 +221,32 @@ jobs:
 
       - name: Add Incus remotes and pull test image
         run: |
-          # Show what remotes exist on this fresh install
+          # images: remote is already present on this Incus install (confirmed)
           sudo incus remote list
-          # Add the images remote (not present by default on apt-installed Incus)
-          sudo incus remote list --format csv | grep -q "^images," || \
-            sudo incus remote add images https://images.linuxcontainers.org \
-              --protocol=simplestreams --accept-certificate
-          # Pull Alpine 3.19 amd64 into local cache to avoid timeout during create
-          sudo incus image copy images:alpine/3.19/amd64 local: --alias ci-alpine \
-            --auto-update=false
-          sudo incus image list local: --format csv | head -5
+          # List available Alpine aliases to find the correct format
+          sudo incus image list images: --format csv 2>/dev/null \
+            | grep -i alpine | head -10 || true
+          # Pull the first available Alpine image into local cache
+          # Try common alias formats in order
+          pulled=0
+          for alias in "alpine/3.20" "alpine/3.19" "alpine/edge" "alpine/3.18"; do
+            if sudo incus image copy "images:${alias}" local: \
+                --alias ci-alpine --auto-update=false 2>/dev/null; then
+              echo "Pulled: images:${alias}"
+              pulled=1
+              break
+            fi
+          done
+          if [ "${pulled}" -eq 0 ]; then
+            echo "Could not pull Alpine — listing available images for diagnosis"
+            sudo incus image list images: --format csv 2>/dev/null | head -20 || true
+            exit 1
+          fi
+          sudo incus image list local: --format csv
 
       - name: Create container (local cached image)
         run: |
-          # Use the locally cached Alpine image — no remote lookup at create time
+          # Use the locally cached image — no remote lookup at create time
           sudo incusbox create \
             --image local:ci-alpine \
             --name ci-test \
