@@ -247,61 +247,74 @@ jobs:
           fi
           sudo incus image list local: --format csv
 
-      - name: Create container (local cached image)
+      - name: Create container with network (local cached image)
         run: |
-          # Use the locally cached image — no remote lookup at create time
-          sudo incusbox create \
-            --image local:ci-alpine \
-            --name ci-test \
-            --root \
-            --yes \
-            --verbose
+          # Launch the container directly via incus (bypassing incusbox-create's
+          # background injection) so we can run incusbox-init synchronously with
+          # a NIC already attached for package installs.
+          sudo incus launch local:ci-alpine ci-test \
+            --profile incusbox-base \
+            --config user.manager=incusbox \
+            --config "user.incusbox.host_user=$(id -run)" \
+            --config "user.incusbox.host_uid=$(id -ru)" \
+            --config "user.incusbox.host_gid=$(id -rg)" \
+            --config "user.incusbox.host_home=${HOME}" \
+            --config "user.incusbox.container_home=${HOME}" \
+            --config user.incusbox.init=0 \
+            --config user.incusbox.nvidia=0 \
+            --config user.incusbox.unshare_groups=0 \
+            --config "raw.lxc=lxc.apparmor.profile = unconfined
+          lxc.cap.drop =
+          lxc.cgroup.devices.allow = a"
+          # Add a bridged NIC for network access (apk install needs internet)
+          sudo incus config device add ci-test eth0 nic \
+            nictype=bridged parent=incusbr0 name=eth0
+          # Add home bind-mount
+          sudo incus config device add ci-test home disk \
+            source="${HOME}" path="${HOME}"
+          # Add /run/host for host-exec test
+          sudo incus config device add ci-test run-host disk \
+            source=/ path=/run/host readonly=true
           echo "Container created"
 
-      - name: Verify container is running and add network
+      - name: Verify container is running
         run: |
           status="$(sudo incus info ci-test | awk '/^Status:/ {print tolower($2)}')"
           echo "Status: ${status}"
           [ "${status}" = "running" ] || { echo "FAIL: expected running"; exit 1; }
-          # Add a bridged NIC so the container can reach the internet for apk/apt
-          sudo incus config device add ci-test eth0 nic \
-            nictype=bridged parent=incusbr0 name=eth0 2>/dev/null || true
-          # Wait briefly for DHCP
+          # Wait for DHCP
           sleep 5
-          sudo incus exec ci-test -- sh -c 'ip addr show eth0 2>/dev/null || true'
+          sudo incus exec ci-test -- sh -c 'ip addr 2>/dev/null || true'
 
-      - name: Run incusbox-init directly (reliable for CI)
+      - name: Run incusbox-init synchronously
         run: |
           uid="$(id -ru)"
           gid="$(id -rg)"
           user="$(id -run)"
           home="${HOME}"
 
-          # Write the incusbox config to a temp file on the host, then push it.
-          # Using a file avoids heredoc expansion issues in the Actions runner.
+          # Write config to host temp file and push — avoids heredoc expansion
           cfg="$(mktemp)"
-          printf 'INCUSBOX_CONTAINER_NAME=ci-test\n'       > "${cfg}"
-          printf 'INCUSBOX_HOST_USER=%s\n'    "${user}"   >> "${cfg}"
-          printf 'INCUSBOX_HOST_UID=%s\n'     "${uid}"    >> "${cfg}"
-          printf 'INCUSBOX_HOST_GID=%s\n'     "${gid}"    >> "${cfg}"
-          printf 'INCUSBOX_HOST_HOME=%s\n'    "${home}"   >> "${cfg}"
-          printf 'INCUSBOX_CONTAINER_HOME=%s\n' "${home}" >> "${cfg}"
-          printf 'INCUSBOX_ADDITIONAL_PACKAGES=\n'        >> "${cfg}"
-          printf 'INCUSBOX_PRE_INIT_HOOK=\n'              >> "${cfg}"
-          printf 'INCUSBOX_INIT_HOOK=\n'                  >> "${cfg}"
-          printf 'INCUSBOX_INIT=0\n'                      >> "${cfg}"
-          printf 'INCUSBOX_NVIDIA=0\n'                    >> "${cfg}"
+          printf 'INCUSBOX_CONTAINER_NAME=ci-test\n'         > "${cfg}"
+          printf 'INCUSBOX_HOST_USER=%s\n'      "${user}"   >> "${cfg}"
+          printf 'INCUSBOX_HOST_UID=%s\n'       "${uid}"    >> "${cfg}"
+          printf 'INCUSBOX_HOST_GID=%s\n'       "${gid}"    >> "${cfg}"
+          printf 'INCUSBOX_HOST_HOME=%s\n'      "${home}"   >> "${cfg}"
+          printf 'INCUSBOX_CONTAINER_HOME=%s\n' "${home}"   >> "${cfg}"
+          printf 'INCUSBOX_ADDITIONAL_PACKAGES=\n'          >> "${cfg}"
+          printf 'INCUSBOX_PRE_INIT_HOOK=\n'                >> "${cfg}"
+          printf 'INCUSBOX_INIT_HOOK=\n'                    >> "${cfg}"
+          printf 'INCUSBOX_INIT=0\n'                        >> "${cfg}"
+          printf 'INCUSBOX_NVIDIA=0\n'                      >> "${cfg}"
           sudo incus file push "${cfg}" ci-test/etc/incusbox-container --mode 0644
           rm -f "${cfg}"
 
-          # Ensure /usr/local/bin exists (not present by default on Alpine)
+          # Ensure /usr/local/bin exists (Alpine omits it)
           sudo incus exec ci-test -- sh -c 'mkdir -p /usr/local/bin'
 
-          # Push incusbox-init (uses #!/bin/sh — works on ash/dash/bash)
+          # Push and run incusbox-init synchronously (#!/bin/sh — works on ash)
           sudo incus file push incusbox/incusbox-init \
             ci-test/usr/local/bin/incusbox-init --mode 0755
-
-          # Run synchronously — sh is always available
           sudo incus exec ci-test -- sh /usr/local/bin/incusbox-init
           echo "incusbox-init completed"
 
