@@ -263,35 +263,38 @@ jobs:
 
       - name: Run incusbox-init directly (reliable for CI)
         run: |
-          # For CI we run incusbox-init synchronously via incus exec rather than
-          # relying on the background nohup injection. This avoids BusyBox sh
-          # nohup timing issues and gives us direct output for diagnosis.
           uid="$(id -ru)"
           gid="$(id -rg)"
           user="$(id -run)"
           home="${HOME}"
-          # Write the config file
-          sudo incus exec ci-test -- sh -c "cat > /etc/incusbox-container" <<CONF
-          INCUSBOX_CONTAINER_NAME=ci-test
-          INCUSBOX_HOST_USER=${user}
-          INCUSBOX_HOST_UID=${uid}
-          INCUSBOX_HOST_GID=${gid}
-          INCUSBOX_HOST_HOME=${home}
-          INCUSBOX_CONTAINER_HOME=${home}
-          INCUSBOX_ADDITIONAL_PACKAGES=
-          INCUSBOX_PRE_INIT_HOOK=
-          INCUSBOX_INIT_HOOK=
-          INCUSBOX_INIT=0
-          INCUSBOX_NVIDIA=0
-          CONF
-          # Ensure bash is available (Alpine ships ash by default)
+
+          # Write the incusbox config to a temp file on the host, then push it.
+          # Using a file avoids heredoc expansion issues in the Actions runner.
+          cfg="$(mktemp)"
+          printf 'INCUSBOX_CONTAINER_NAME=ci-test\n'       > "${cfg}"
+          printf 'INCUSBOX_HOST_USER=%s\n'    "${user}"   >> "${cfg}"
+          printf 'INCUSBOX_HOST_UID=%s\n'     "${uid}"    >> "${cfg}"
+          printf 'INCUSBOX_HOST_GID=%s\n'     "${gid}"    >> "${cfg}"
+          printf 'INCUSBOX_HOST_HOME=%s\n'    "${home}"   >> "${cfg}"
+          printf 'INCUSBOX_CONTAINER_HOME=%s\n' "${home}" >> "${cfg}"
+          printf 'INCUSBOX_ADDITIONAL_PACKAGES=\n'        >> "${cfg}"
+          printf 'INCUSBOX_PRE_INIT_HOOK=\n'              >> "${cfg}"
+          printf 'INCUSBOX_INIT_HOOK=\n'                  >> "${cfg}"
+          printf 'INCUSBOX_INIT=0\n'                      >> "${cfg}"
+          printf 'INCUSBOX_NVIDIA=0\n'                    >> "${cfg}"
+          sudo incus file push "${cfg}" ci-test/etc/incusbox-container --mode 0644
+          rm -f "${cfg}"
+
+          # Ensure /usr/local/bin exists and bash is available on Alpine
+          sudo incus exec ci-test -- sh -c 'mkdir -p /usr/local/bin'
           sudo incus exec ci-test -- sh -c \
-            'command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null 2>&1 || true'
-          # Push and run incusbox-init synchronously via bash
+            'command -v bash >/dev/null 2>&1 || apk add --no-cache bash 2>&1'
+
+          # Push incusbox-init and run it synchronously via bash
           sudo incus file push incusbox/incusbox-init \
             ci-test/usr/local/bin/incusbox-init --mode 0755
           sudo incus exec ci-test -- bash /usr/local/bin/incusbox-init
-          echo "incusbox-init exit code: $?"
+          echo "incusbox-init completed"
 
       - name: Verify user exists inside container
         run: |
