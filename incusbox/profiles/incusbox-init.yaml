@@ -1,0 +1,49 @@
+name: incusbox-init
+description: Profile for incusbox containers using an init system (systemd/openrc)
+config:
+  # systemd inside a container needs these tmpfs mounts and the SIGRTMIN+3
+  # stop signal. This mirrors what podman --systemd=always does.
+  raw.lxc: |
+    lxc.apparmor.profile = unconfined
+    lxc.cap.drop =
+    lxc.cgroup.devices.allow = a
+    lxc.autodev = 1
+
+  # Unshare the PID namespace so the container has its own PID 1 (systemd).
+  # Without this, systemd cannot be PID 1 inside the container.
+  security.privileged: "false"
+
+  # cgroupns=host is needed for systemd cgroup management
+  raw.lxc: |
+    lxc.apparmor.profile = unconfined
+    lxc.cap.drop =
+    lxc.cgroup.devices.allow = a
+    lxc.autodev = 1
+    lxc.init.cmd = /sbin/init
+
+devices:
+  # tmpfs mounts required by systemd
+  run:
+    type: disk
+    path: /run
+    source: tmpfs
+    optional: "true"
+
+  run-lock:
+    type: disk
+    path: /run/lock
+    source: tmpfs
+    optional: "true"
+
+  journal:
+    type: disk
+    path: /var/lib/journal
+    source: tmpfs
+    optional: "true"
+
+  # cgroup v2 filesystem
+  cgroup2:
+    type: disk
+    path: /sys/fs/cgroup
+    source: cgroup2
+    optional: "true"

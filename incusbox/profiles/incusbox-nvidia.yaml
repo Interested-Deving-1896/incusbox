@@ -1,0 +1,41 @@
+name: incusbox-nvidia
+description: NVIDIA GPU passthrough for incusbox containers
+config:
+  # Enable NVIDIA runtime integration. Incus will bind-mount the host's
+  # NVIDIA driver libraries and expose GPU devices automatically.
+  nvidia.runtime: "true"
+  nvidia.driver.capabilities: all
+
+  # Allow access to all NVIDIA devices. If you have multiple GPUs and want
+  # to restrict to specific ones, set nvidia.gpu.uuid instead.
+  # nvidia.gpu.uuid: GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+devices:
+  # NVIDIA control device — always required
+  nvidiactl:
+    type: unix-char
+    path: /dev/nvidiactl
+    source: /dev/nvidiactl
+
+  # Primary GPU device. Add nvidia1, nvidia2, etc. for multi-GPU hosts.
+  nvidia0:
+    type: unix-char
+    path: /dev/nvidia0
+    source: /dev/nvidia0
+
+  # Unified Memory device — required for CUDA applications
+  nvidia-uvm:
+    type: unix-char
+    path: /dev/nvidia-uvm
+    source: /dev/nvidia-uvm
+
+  nvidia-uvm-tools:
+    type: unix-char
+    path: /dev/nvidia-uvm-tools
+    source: /dev/nvidia-uvm-tools
+
+  # Modeset device — required for display/Wayland GPU use
+  nvidia-modeset:
+    type: unix-char
+    path: /dev/nvidia-modeset
+    source: /dev/nvidia-modeset

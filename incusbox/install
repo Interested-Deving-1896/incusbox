@@ -1,0 +1,176 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox install script
+# Installs incusbox scripts, profiles, and data files.
+# Supports both system-wide (/usr/local) and user (~/.local) installs.
+
+set -e
+
+version="0.1.0"
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+prefix=""
+user_install=0
+verbose=0
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+log()  { printf '%s\n' "$*"; }
+info() { [ "${verbose}" -eq 1 ] && printf '  %s\n' "$*"; }
+die()  { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+show_help() {
+    cat <<EOF
+incusbox installer version: ${version}
+
+Usage:
+  ./install [OPTIONS]
+
+Options:
+  --prefix PATH    Install prefix (default: /usr/local for root, ~/.local for user)
+  --user           Install to ~/.local (no root required)
+  -v, --verbose    Show verbose output
+  -h, --help       Show this help
+
+Examples:
+  sudo ./install                    # system-wide install to /usr/local
+  ./install --user                  # user install to ~/.local
+  ./install --prefix /opt/incusbox  # custom prefix
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --prefix)    prefix="$2";   shift 2 ;;
+        --user)      user_install=1; shift ;;
+        -v|--verbose) verbose=1;    shift ;;
+        -h|--help)   show_help; exit 0 ;;
+        *) die "Unknown option: $1" ;;
+    esac
+done
+
+# Determine prefix
+if [ -z "${prefix}" ]; then
+    if [ "${user_install}" -eq 1 ] || [ "$(id -ru)" -ne 0 ]; then
+        prefix="${HOME}/.local"
+        user_install=1
+    else
+        prefix="/usr/local"
+    fi
+fi
+
+bin_dir="${prefix}/bin"
+share_dir="${prefix}/share/incusbox"
+profiles_dir="${share_dir}/profiles"
+
+# Source directory (where this install script lives)
+src_dir="$(cd "$(dirname "$0")" && pwd)"
+
+log "Installing incusbox ${version} to ${prefix}"
+
+# ── create directories ────────────────────────────────────────────────────────
+install -d "${bin_dir}"
+install -d "${share_dir}"
+install -d "${profiles_dir}"
+info "Created directories"
+
+# ── install executables ───────────────────────────────────────────────────────
+executables="
+incusbox
+incusbox-create
+incusbox-enter
+incusbox-init
+incusbox-export
+incusbox-host-exec
+incusbox-list
+incusbox-rm
+incusbox-stop
+incusbox-upgrade
+"
+
+for exe in ${executables}; do
+    src="${src_dir}/${exe}"
+    if [ -f "${src}" ]; then
+        install -m 0755 "${src}" "${bin_dir}/${exe}"
+        info "Installed ${bin_dir}/${exe}"
+    else
+        log "Warning: ${exe} not found in ${src_dir}, skipping"
+    fi
+done
+
+# ── install data files ────────────────────────────────────────────────────────
+# incusbox-init is also installed to share_dir so incusbox-create can find it
+# when generating cloud-init user-data (the path may differ from bin_dir).
+install -m 0755 "${src_dir}/incusbox-init" "${share_dir}/incusbox-init"
+info "Installed ${share_dir}/incusbox-init"
+
+# ── install profiles ──────────────────────────────────────────────────────────
+for profile_yaml in "${src_dir}"/profiles/*.yaml; do
+    [ -f "${profile_yaml}" ] || continue
+    install -m 0644 "${profile_yaml}" "${profiles_dir}/"
+    info "Installed profile $(basename "${profile_yaml}")"
+done
+
+# ── register Incus profiles ───────────────────────────────────────────────────
+# Attempt to register profiles with the running Incus daemon.
+# This is best-effort — skip silently if incus is not available.
+if command -v incus >/dev/null 2>&1; then
+    log "Registering Incus profiles..."
+    for profile_yaml in "${profiles_dir}"/*.yaml; do
+        [ -f "${profile_yaml}" ] || continue
+        profile_name="$(basename "${profile_yaml}" .yaml)"
+        if ! incus profile show "${profile_name}" >/dev/null 2>&1; then
+            incus profile create "${profile_name}" < "${profile_yaml}" 2>/dev/null && \
+                info "Created Incus profile: ${profile_name}" || \
+                log "Warning: failed to create profile ${profile_name}"
+        else
+            info "Profile ${profile_name} already exists, skipping"
+        fi
+    done
+else
+    log "Note: 'incus' not found — profiles not registered. Run manually:"
+    log "  incus profile create incusbox-base < ${profiles_dir}/incusbox-base.yaml"
+fi
+
+# ── register OCI remotes ──────────────────────────────────────────────────────
+if command -v incus >/dev/null 2>&1; then
+    log "Registering OCI remotes..."
+    # docker.io
+    if ! incus remote list --format csv 2>/dev/null | grep -q '^docker,'; then
+        incus remote add docker https://docker.io --protocol=oci --accept-certificate \
+            2>/dev/null && info "Registered remote: docker (docker.io)" || \
+            log "Warning: failed to register docker remote"
+    fi
+    # ghcr.io
+    if ! incus remote list --format csv 2>/dev/null | grep -q '^ghcr,'; then
+        incus remote add ghcr https://ghcr.io --protocol=oci --accept-certificate \
+            2>/dev/null && info "Registered remote: ghcr (ghcr.io)" || \
+            log "Warning: failed to register ghcr remote"
+    fi
+    # quay.io
+    if ! incus remote list --format csv 2>/dev/null | grep -q '^quay,'; then
+        incus remote add quay https://quay.io --protocol=oci --accept-certificate \
+            2>/dev/null && info "Registered remote: quay (quay.io)" || \
+            log "Warning: failed to register quay remote"
+    fi
+fi
+
+# ── PATH reminder for user installs ──────────────────────────────────────────
+if [ "${user_install}" -eq 1 ]; then
+    case ":${PATH}:" in
+        *":${bin_dir}:"*) ;;
+        *)
+            log ""
+            log "Note: ${bin_dir} is not in your PATH."
+            log "Add it with:"
+            log "  export PATH=\"\${PATH}:${bin_dir}\""
+            log "Or add that line to your ~/.bashrc / ~/.zshrc"
+            ;;
+    esac
+fi
+
+log ""
+log "incusbox ${version} installed successfully."
+log ""
+log "Quick start:"
+log "  incusbox create --image docker:ubuntu:22.04 --name mybox"
+log "  incusbox enter mybox"

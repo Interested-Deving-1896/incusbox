@@ -1,0 +1,85 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-list: list incusbox containers
+
+set -e
+
+[ -z "${USER}" ] && USER="$(id -run)"
+[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+
+rootful=0
+verbose=0
+version="0.1.0"
+
+config_files="
+/usr/share/incusbox/incusbox.conf
+/usr/local/share/incusbox/incusbox.conf
+/etc/incusbox/incusbox.conf
+${XDG_CONFIG_HOME:-"${HOME}/.config"}/incusbox/incusbox.conf
+${HOME}/.incusboxrc
+"
+for _cf in ${config_files}; do
+    # shellcheck disable=SC1090
+    [ -e "${_cf}" ] && . "$(realpath "${_cf}")"
+done
+
+show_help() {
+    cat <<EOF
+incusbox version: ${version}
+
+Usage:
+  incusbox list [OPTIONS]
+
+Options:
+  -r, --root     List rootful containers
+  -v, --verbose  Show verbose output
+  -V, --version  Show version
+  -h, --help     Show this help
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -r|--root)    rootful=1;                  shift ;;
+        -v|--verbose) verbose=1;                  shift ;;
+        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)    show_help; exit 0 ;;
+        *) shift ;;
+    esac
+done
+
+if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
+    INCUS="sudo incus"
+else
+    INCUS="incus"
+fi
+
+command -v incus >/dev/null 2>&1 || { printf >&2 'Error: incus not found\n'; exit 1; }
+
+# Print header
+printf '%-30s %-12s %-20s %-15s %s\n' \
+    "NAME" "STATUS" "IMAGE" "IP" "NOTES"
+printf '%s\n' "$(printf '%.0s-' $(seq 1 90))"
+
+# List all containers managed by incusbox (user.manager=incusbox)
+${INCUS} list --format csv 2>/dev/null | while IFS=',' read -r name status ipv4 ipv6 type snapshots; do
+    # Filter to only incusbox containers
+    manager="$(${INCUS} config get "${name}" user.manager 2>/dev/null || true)"
+    [ "${manager}" = "incusbox" ] || continue
+
+    # Gather metadata
+    image="$(${INCUS} config get "${name}" volatile.base_image 2>/dev/null \
+        || ${INCUS} info "${name}" 2>/dev/null | awk '/Image:/ {print $2}' \
+        || printf 'unknown')"
+    # Truncate image to 20 chars
+    image="$(printf '%.20s' "${image}")"
+
+    notes=""
+    init="$(${INCUS} config get "${name}" user.incusbox.init 2>/dev/null || true)"
+    nvidia="$(${INCUS} config get "${name}" user.incusbox.nvidia 2>/dev/null || true)"
+    [ "${init}" = "1" ]   && notes="${notes}init "
+    [ "${nvidia}" = "1" ] && notes="${notes}nvidia "
+
+    printf '%-30s %-12s %-20s %-15s %s\n' \
+        "${name}" "${status}" "${image}" "${ipv4:-"-"}" "${notes:-"-"}"
+done

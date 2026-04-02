@@ -1,0 +1,116 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-upgrade: upgrade packages inside one or more incusbox containers
+
+set -e
+
+[ -z "${USER}" ] && USER="$(id -run)"
+[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+
+rootful=0
+all=0
+verbose=0
+version="0.1.0"
+
+config_files="
+/usr/share/incusbox/incusbox.conf
+/usr/local/share/incusbox/incusbox.conf
+/etc/incusbox/incusbox.conf
+${XDG_CONFIG_HOME:-"${HOME}/.config"}/incusbox/incusbox.conf
+${HOME}/.incusboxrc
+"
+for _cf in ${config_files}; do
+    # shellcheck disable=SC1090
+    [ -e "${_cf}" ] && . "$(realpath "${_cf}")"
+done
+
+log() { printf >&2 '%s\n' "$*"; }
+die() { printf >&2 'Error: %s\n' "$*"; exit 1; }
+
+show_help() {
+    cat <<EOF
+incusbox version: ${version}
+
+Usage:
+  incusbox upgrade [OPTIONS] [NAME...]
+
+Options:
+  -a, --all      Upgrade all incusbox containers
+  -r, --root     Use rootful incus
+  -v, --verbose  Show verbose output
+  -V, --version  Show version
+  -h, --help     Show this help
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -a|--all)     all=1;                      shift ;;
+        -r|--root)    rootful=1;                  shift ;;
+        -v|--verbose) verbose=1;                  shift ;;
+        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)    show_help; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *)  break ;;
+    esac
+done
+
+if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
+    INCUS="sudo incus"
+else
+    INCUS="incus"
+fi
+
+command -v incus >/dev/null 2>&1 || die "'incus' not found in PATH"
+
+upgrade_container() {
+    local name="$1"
+    local status
+    status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
+
+    if [ "${status}" != "running" ]; then
+        log "Starting ${name} for upgrade..."
+        ${INCUS} start "${name}" || { log "Failed to start ${name}, skipping"; return 1; }
+    fi
+
+    log "Upgrading packages in '${name}'..."
+    # Detect distro and run the appropriate upgrade command
+    ${INCUS} exec "${name}" -- sh -c '
+        if command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get update -y && \
+            DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf upgrade -y
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -Syu --noconfirm
+        elif command -v apk >/dev/null 2>&1; then
+            apk upgrade
+        elif command -v zypper >/dev/null 2>&1; then
+            zypper update -y
+        elif command -v xbps-install >/dev/null 2>&1; then
+            xbps-install -Su
+        else
+            printf "Warning: unknown package manager\n" >&2
+        fi
+    ' && log "Upgraded '${name}'." || log "Warning: upgrade of '${name}' exited non-zero"
+}
+
+if [ "${all}" -eq 1 ]; then
+    ${INCUS} list --format csv 2>/dev/null | while IFS=',' read -r name _rest; do
+        manager="$(${INCUS} config get "${name}" user.manager 2>/dev/null || true)"
+        [ "${manager}" = "incusbox" ] || continue
+        upgrade_container "${name}"
+    done
+    exit 0
+fi
+
+[ "$#" -eq 0 ] && die "Container name required. Usage: incusbox upgrade NAME [NAME...]"
+
+for container_name in "$@"; do
+    if ! ${INCUS} info "${container_name}" >/dev/null 2>&1; then
+        log "Container '${container_name}' not found, skipping."
+        continue
+    fi
+    upgrade_container "${container_name}"
+done

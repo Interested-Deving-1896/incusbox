@@ -1,0 +1,51 @@
+name: incusbox-rootless
+description: Rootless incusbox via incus-user daemon
+# Applied automatically when running as a non-root user via incus-user.
+# Incorporates the AppArmor + fuse-overlayfs patterns from podclaw/blincus
+# needed on Ubuntu 24.04+ where unprivileged user namespaces are restricted.
+config:
+  security.nesting: "true"
+  security.privileged: "false"
+
+  # Syscall interception for rootless Podman/Docker inside the container.
+  # Required on kernels that restrict unprivileged mknod/setxattr.
+  security.syscalls.intercept.mknod: "true"
+  security.syscalls.intercept.setxattr: "true"
+  security.syscalls.intercept.bpf: "true"
+
+  # UID/GID mapping — maps host user's UID 1000 to container UID 1000.
+  # Adjust if your host user has a different UID.
+  raw.idmap: |
+    uid 1000 1000
+    gid 1000 1000
+
+  # AppArmor profile — unconfined allows the nested user namespace operations
+  # that rootless Podman/Docker require. On Ubuntu 24.04 the default AppArmor
+  # policy blocks unprivileged userns; this overrides it.
+  # See: podclaw NOTES.md — "AppArmor userns profiles are required on Ubuntu 24.04"
+  raw.lxc: |
+    lxc.apparmor.profile = unconfined
+    lxc.cap.drop =
+    lxc.cgroup.devices.allow = a
+
+  environment.INCUSBOX: "1"
+  environment.TERMINFO_DIRS: /usr/share/terminfo:/run/host/usr/share/terminfo
+
+devices:
+  root:
+    path: /
+    pool: default
+    type: disk
+
+  # fuse device — required for fuse-overlayfs which avoids the 10+ minute
+  # recursive chown penalty when using rootless Podman with --userns keep-id.
+  # See: podclaw NOTES.md — "fuse-overlayfs is critical"
+  fuse:
+    type: unix-char
+    path: /dev/fuse
+    source: /dev/fuse
+
+  tun:
+    type: unix-char
+    path: /dev/net/tun
+    source: /dev/net/tun

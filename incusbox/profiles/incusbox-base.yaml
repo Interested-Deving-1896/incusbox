@@ -1,0 +1,59 @@
+name: incusbox-base
+description: Base profile for all incusbox containers
+config:
+  # Allow nested containers and user namespaces (required for rootless Podman
+  # inside the container, fuse-overlayfs, etc.)
+  security.nesting: "true"
+
+  # Syscall interception needed for mknod (device creation) and setxattr
+  # (extended attributes for overlayfs). Required for rootless Podman/Docker
+  # inside the container. Pattern from podclaw/blincus.
+  security.syscalls.intercept.mknod: "true"
+  security.syscalls.intercept.setxattr: "true"
+  security.syscalls.intercept.bpf: "true"
+
+  # Allow the container to load kernel modules (overlay, nf_nat, etc.)
+  linux.kernel_modules: overlay,nf_nat,ip_tables,ip6_tables,netlink_diag,br_netfilter,xt_conntrack,af_packet
+
+  # Keep original supplementary groups from the host user
+  raw.idmap: |
+    uid 1000 1000
+    gid 1000 1000
+
+  # Default stop signal
+  raw.lxc: |
+    lxc.apparmor.profile = unconfined
+    lxc.cap.drop =
+    lxc.cgroup.devices.allow = a
+
+  # Environment defaults
+  environment.INCUSBOX: "1"
+  environment.TERMINFO_DIRS: /usr/share/terminfo:/run/host/usr/share/terminfo
+
+description: incusbox base profile — applied to all containers
+devices:
+  # Root disk — pool is overridden per-container by incusbox-create
+  root:
+    path: /
+    pool: default
+    type: disk
+
+  # /dev/pts — needed for terminal allocation inside the container
+  # An empty volume here ensures the container gets its own devpts instance
+  # rather than sharing the host's, which prevents permission issues.
+  devpts:
+    type: unix-char
+    path: /dev/pts
+
+  # /dev/fuse — required for fuse-overlayfs (rootless container storage)
+  # and for FUSE filesystems like sshfs inside the container.
+  fuse:
+    type: unix-char
+    path: /dev/fuse
+    source: /dev/fuse
+
+  # /dev/net/tun — needed for VPN clients (wireguard, openvpn) inside container
+  tun:
+    type: unix-char
+    path: /dev/net/tun
+    source: /dev/net/tun
