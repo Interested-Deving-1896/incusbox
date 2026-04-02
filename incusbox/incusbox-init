@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-init: in-container setup script, injected via cloud-init.
 # Replaces distrobox-init. Runs once at first boot inside the container.
