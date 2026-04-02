@@ -302,6 +302,10 @@ jobs:
           # Verify network connectivity
           sudo incus exec ci-test -- sh -c \
             'ping -c1 -W3 1.1.1.1 >/dev/null 2>&1 && echo "network OK" || echo "network WARN: no ping"'
+          # Pre-install bash while network is confirmed up.
+          # incusbox-export uses 'local' variables which require bash;
+          # Alpine's busybox sh does not support them.
+          sudo incus exec ci-test -- apk add --no-cache bash
 
       - name: Run incusbox-init synchronously
         run: |
@@ -318,8 +322,7 @@ jobs:
           printf 'INCUSBOX_HOST_GID=%s\n'       "${gid}"    >> "${cfg}"
           printf 'INCUSBOX_HOST_HOME=%s\n'      "${home}"   >> "${cfg}"
           printf 'INCUSBOX_CONTAINER_HOME=%s\n' "${home}"   >> "${cfg}"
-          # bash is needed by incusbox-export (uses 'local' variables)
-          printf 'INCUSBOX_ADDITIONAL_PACKAGES=bash\n'      >> "${cfg}"
+          printf 'INCUSBOX_ADDITIONAL_PACKAGES=\n'          >> "${cfg}"
           printf 'INCUSBOX_PRE_INIT_HOOK=\n'                >> "${cfg}"
           printf 'INCUSBOX_INIT_HOOK=\n'                    >> "${cfg}"
           printf 'INCUSBOX_INIT=0\n'                        >> "${cfg}"
