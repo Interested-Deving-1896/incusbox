@@ -139,15 +139,22 @@ setup_user() {
         # addgroup: -g GID NAME  (no --gid long form in BusyBox)
         # adduser:  -u UID -G GROUP -h HOME -s SHELL -D (no-password) NAME
         # The group must exist before adduser -G references it.
+        #
+        # GID conflicts: the host GID (e.g. 127 for "docker") may already be
+        # taken inside the container by a different group. In that case we
+        # skip creating a new group and reuse whatever group owns that GID.
+        local grp_name
         if ! getent group "${INCUSBOX_HOST_GID}" >/dev/null 2>&1; then
-            addgroup -g "${INCUSBOX_HOST_GID}" "${INCUSBOX_HOST_USER}" 2>/dev/null \
-                || log "Warning: addgroup failed for gid=${INCUSBOX_HOST_GID}"
+            if addgroup -g "${INCUSBOX_HOST_GID}" "${INCUSBOX_HOST_USER}" 2>/dev/null; then
+                grp_name="${INCUSBOX_HOST_USER}"
+            else
+                log "Warning: addgroup failed for gid=${INCUSBOX_HOST_GID}, using users"
+                grp_name="users"
+            fi
+        else
+            grp_name="$(getent group "${INCUSBOX_HOST_GID}" | cut -d: -f1)"
         fi
         if ! getent passwd "${INCUSBOX_HOST_USER}" >/dev/null 2>&1; then
-            # Resolve the group name from GID for -G flag
-            local grp_name
-            grp_name="$(getent group "${INCUSBOX_HOST_GID}" 2>/dev/null | cut -d: -f1 \
-                || printf '%s' "${INCUSBOX_HOST_USER}")"
             adduser \
                 -u "${INCUSBOX_HOST_UID}" \
                 -G "${grp_name}" \
