@@ -112,11 +112,24 @@ container_config() {
 }
 
 # ── readiness wait ────────────────────────────────────────────────────────────
-# Waits for incusbox-init (run via cloud-init) to write /run/incusbox-ready.
-# Falls back to polling cloud-init status if the file never appears.
+# Waits for incusbox-init to write /run/incusbox-ready.
+#
+# Two injection paths exist:
+#   cloud-init  (user.incusbox.init=1) — incusbox-init runs asynchronously via
+#               cloud-init runcmd; we poll /run/incusbox-ready and use
+#               cloud-init status as a secondary signal.
+#   exec-inject (user.incusbox.init=0) — incusbox-init was run synchronously
+#               before enter was called; /run/incusbox-ready should already
+#               exist. The cloud-init fallback is skipped entirely to avoid
+#               misleading warnings on containers that don't have cloud-init.
 wait_for_ready() {
     local elapsed=0
     local interval=2
+
+    # Determine injection path from container metadata
+    local uses_cloudinit
+    uses_cloudinit="$(${INCUS} config get "${container_name}" \
+        user.incusbox.init 2>/dev/null || true)"
 
     printf >&2 '%-40s\t' "Waiting for container setup..."
 
@@ -138,24 +151,26 @@ wait_for_ready() {
             return 0
         fi
 
-        # Secondary: check cloud-init status
-        local ci_status
-        ci_status="$(${INCUS} exec "${container_name}" -- \
-            cloud-init status 2>/dev/null | awk '{print $NF}' || true)"
-        case "${ci_status}" in
-            error)
-                printf >&2 '\n'
-                ${INCUS} exec "${container_name}" -- \
-                    cloud-init status --long >&2 2>/dev/null || true
-                die "cloud-init reported an error" ;;
-            done)
-                # cloud-init done but no ready file — incusbox-init may have failed
-                printf >&2 '\n'
-                log "cloud-init finished but /run/incusbox-ready not found"
-                log "Check logs: incus exec ${container_name} -- journalctl -u cloud-final"
-                # Don't die — container may still be usable
-                return 0 ;;
-        esac
+        # Secondary: cloud-init status — only for cloud-init injection path.
+        # Skipped for exec-injection containers (no cloud-init installed).
+        if [ "${uses_cloudinit}" = "1" ]; then
+            local ci_status
+            ci_status="$(${INCUS} exec "${container_name}" -- \
+                cloud-init status 2>/dev/null | awk '{print $NF}' || true)"
+            case "${ci_status}" in
+                error)
+                    printf >&2 '\n'
+                    ${INCUS} exec "${container_name}" -- \
+                        cloud-init status --long >&2 2>/dev/null || true
+                    die "cloud-init reported an error" ;;
+                done)
+                    # cloud-init finished but no ready file — incusbox-init failed
+                    printf >&2 '\n'
+                    log "cloud-init finished but /run/incusbox-ready not found"
+                    log "Check: incus exec ${container_name} -- journalctl -u cloud-final"
+                    return 0 ;;
+            esac
+        fi
 
         sleep "${interval}"
         elapsed=$((elapsed + interval))
@@ -163,8 +178,13 @@ wait_for_ready() {
     done
 
     printf >&2 '\n'
-    log "Warning: timed out waiting for container setup (${init_timeout}s)"
-    log "Container may not be fully configured. Check: incus exec ${container_name} -- cloud-init status"
+    if [ "${uses_cloudinit}" = "1" ]; then
+        log "Warning: timed out waiting for container setup (${init_timeout}s)"
+        log "Check: incus exec ${container_name} -- cloud-init status"
+    else
+        log "Warning: timed out waiting for /run/incusbox-ready (${init_timeout}s)"
+        log "Check: incus exec ${container_name} -- ls /run/incusbox-ready"
+    fi
 }
 
 # ── start container if needed ─────────────────────────────────────────────────

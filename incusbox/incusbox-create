@@ -480,6 +480,24 @@ configure_devices() {
             readonly=true 2>/dev/null || true
 }
 
+# ── distro inference ──────────────────────────────────────────────────────────
+# Derive a distro ID from the image string for use as user.incusbox.distro.
+# This is a best-effort hint; incusbox-init always re-detects inside the container.
+infer_distro() {
+    local img="${1,,}"   # lowercase
+    case "${img}" in
+        *ubuntu*)                        printf 'ubuntu'  ;;
+        *debian*)                        printf 'debian'  ;;
+        *fedora*)                        printf 'fedora'  ;;
+        *centos*|*rhel*|*almalinux*|*rocky*) printf 'fedora' ;;
+        *alpine*)                        printf 'alpine'  ;;
+        *arch*|*manjaro*)                printf 'arch'    ;;
+        *opensuse*|*sles*)               printf 'opensuse' ;;
+        *void*)                          printf 'void'    ;;
+        *)                               printf ''        ;;
+    esac
+}
+
 # ── container config ──────────────────────────────────────────────────────────
 configure_container() {
     local name="$1"
@@ -494,7 +512,9 @@ configure_container() {
         user.incusbox.container_home="${effective_home}" \
         user.incusbox.unshare_groups="${unshare_groups}" \
         user.incusbox.init="${init}" \
-        user.incusbox.nvidia="${nvidia}"
+        user.incusbox.nvidia="${nvidia}" \
+        user.incusbox.image="${container_image}" \
+        user.incusbox.distro="$(infer_distro "${container_image}")"
 
     # Environment variables
     ${INCUS} config set "${name}" \

@@ -1,0 +1,92 @@
+.TH INCUSBOX 1 "2026" "incusbox 0.1.0" "User Commands"
+.SH NAME
+incusbox \- Incus-backed distrobox replacement
+.SH SYNOPSIS
+.B incusbox
+.I COMMAND
+.RI [ OPTIONS ]
+.RI [ ARGS ]
+.SH DESCRIPTION
+.B incusbox
+manages Linux containers backed by Incus, providing a distrobox-compatible
+workflow: containers share the host user's home directory, UID/GID, and
+network namespace, so tools installed inside a container are accessible
+from the host shell.
+.PP
+Each container is initialised by
+.BR incusbox-init (1),
+which installs core packages, creates the host user inside the container,
+and configures passwordless sudo.
+.SH COMMANDS
+.TP
+.B create
+Create a new incusbox container.
+See
+.BR incusbox-create (1).
+.TP
+.B enter
+Enter a running container (starts it first if stopped).
+See
+.BR incusbox-enter (1).
+.TP
+.B list\fR, \fBls
+List incusbox containers.
+.TP
+.B stop
+Stop one or more containers.
+.TP
+.B rm\fR, \fBremove
+Remove one or more containers.
+.TP
+.B upgrade
+Upgrade packages inside one or more containers.
+.TP
+.B assemble
+Create containers from a declarative YAML file.
+See
+.BR incusbox-assemble (1).
+.TP
+.B setup-rootless
+Configure the host for rootless Incus operation.
+.TP
+.B export
+Export a container as an OCI image.
+.TP
+.B host-exec
+Run a host command from inside a container via the
+.I /run/host
+bind-mount.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Show help and exit.
+.TP
+.BR \-V ", " \-\-version
+Show version and exit.
+.SH ENVIRONMENT
+.TP
+.B INCUS_SOCKET
+Path to the Incus Unix socket. Set automatically for rootless operation.
+.TP
+.B XDG_RUNTIME_DIR
+Used to locate the rootless Incus socket at
+.IR $XDG_RUNTIME_DIR/incus/incus.socket .
+.SH FILES
+.TP
+.I /usr/local/share/incusbox/profiles/
+Incus profile YAML files installed by
+.BR incusbox-install (1).
+.TP
+.I ~/.config/incusbox/incusbox.conf
+Per-user configuration file sourced at startup.
+.TP
+.I /etc/incusbox/incusbox.conf
+System-wide configuration file.
+.SH SEE ALSO
+.BR incusbox-create (1),
+.BR incusbox-enter (1),
+.BR incusbox-init (1),
+.BR incusbox-assemble (1),
+.BR incus (1)
+.SH BUGS
+Report bugs at https://github.com/Interested-Deving-1896/incusbox/issues

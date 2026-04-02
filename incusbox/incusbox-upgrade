@@ -72,34 +72,62 @@ command -v incus >/dev/null 2>&1 || die "'incus' not found in PATH"
 
 upgrade_container() {
     local name="$1"
-    local status
-    status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
+    local status manager
 
+    # Warn if this container wasn't created by incusbox
+    manager="$(${INCUS} config get "${name}" user.manager 2>/dev/null || true)"
+    if [ "${manager}" != "incusbox" ]; then
+        log "Warning: '${name}' was not created by incusbox (user.manager=${manager:-unset})"
+    fi
+
+    status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
     if [ "${status}" != "running" ]; then
         log "Starting ${name} for upgrade..."
         ${INCUS} start "${name}" || { log "Failed to start ${name}, skipping"; return 1; }
     fi
 
-    log "Upgrading packages in '${name}'..."
-    # Detect distro and run the appropriate upgrade command
-    ${INCUS} exec "${name}" -- sh -c '
-        if command -v apt-get >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive apt-get update -y && \
-            DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-        elif command -v dnf >/dev/null 2>&1; then
-            dnf upgrade -y
-        elif command -v pacman >/dev/null 2>&1; then
-            pacman -Syu --noconfirm
-        elif command -v apk >/dev/null 2>&1; then
-            apk upgrade
-        elif command -v zypper >/dev/null 2>&1; then
-            zypper update -y
-        elif command -v xbps-install >/dev/null 2>&1; then
-            xbps-install -Su
-        else
-            printf "Warning: unknown package manager\n" >&2
-        fi
-    ' && log "Upgraded '${name}'." || log "Warning: upgrade of '${name}' exited non-zero"
+    # Use stored distro hint from incusbox metadata when available; fall back to
+    # runtime package-manager detection for containers not created by incusbox.
+    local distro_hint
+    distro_hint="$(${INCUS} config get "${name}" user.incusbox.distro 2>/dev/null || true)"
+
+    log "Upgrading packages in '${name}' (distro=${distro_hint:-auto})..."
+    ${INCUS} exec "${name}" -- sh -c "
+        distro='${distro_hint}'
+        case \"\${distro}\" in
+            ubuntu|debian|linuxmint|pop)
+                DEBIAN_FRONTEND=noninteractive apt-get update -y &&
+                DEBIAN_FRONTEND=noninteractive apt-get upgrade -y ;;
+            fedora|rhel|centos|almalinux|rocky)
+                dnf upgrade -y 2>/dev/null || yum upgrade -y ;;
+            arch|manjaro|endeavouros)
+                pacman -Syu --noconfirm ;;
+            alpine)
+                apk upgrade ;;
+            opensuse*|sles)
+                zypper update -y ;;
+            void)
+                xbps-install -Su ;;
+            *)
+                # No stored hint — probe at runtime
+                if command -v apt-get >/dev/null 2>&1; then
+                    DEBIAN_FRONTEND=noninteractive apt-get update -y &&
+                    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+                elif command -v dnf >/dev/null 2>&1; then
+                    dnf upgrade -y
+                elif command -v pacman >/dev/null 2>&1; then
+                    pacman -Syu --noconfirm
+                elif command -v apk >/dev/null 2>&1; then
+                    apk upgrade
+                elif command -v zypper >/dev/null 2>&1; then
+                    zypper update -y
+                elif command -v xbps-install >/dev/null 2>&1; then
+                    xbps-install -Su
+                else
+                    printf 'Warning: unknown package manager in %s\n' '${name}' >&2
+                fi ;;
+        esac
+    " && log "Upgraded '${name}'." || log "Warning: upgrade of '${name}' exited non-zero"
 }
 
 if [ "${all}" -eq 1 ]; then

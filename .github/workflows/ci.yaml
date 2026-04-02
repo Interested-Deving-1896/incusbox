@@ -107,6 +107,16 @@ jobs:
               exit 1
             fi
           done
+          # Verify man pages landed
+          for page in incusbox incusbox-create incusbox-enter \
+                      incusbox-init incusbox-assemble; do
+            if [ -f "${HOME}/.local/share/man/man1/${page}.1" ]; then
+              echo "OK:   man1/${page}.1"
+            else
+              echo "FAIL: man1/${page}.1 not found"
+              exit 1
+            fi
+          done
 
   profile-yaml:
     name: Validate profile YAML

@@ -125,6 +125,21 @@ if [ -f "${src_dir}/completions/incusbox.zsh" ]; then
     info "Installed zsh completion: ${zsh_completion_dir}/_incusbox"
 fi
 
+# ── install man pages ────────────────────────────────────────────────────────
+if [ -d "${src_dir}/man" ]; then
+    if [ "${user_install}" -eq 1 ]; then
+        man_dir="${HOME}/.local/share/man/man1"
+    else
+        man_dir="${prefix}/share/man/man1"
+    fi
+    install -d "${man_dir}"
+    for page in "${src_dir}"/man/*.1; do
+        [ -f "${page}" ] || continue
+        install -m 0644 "${page}" "${man_dir}/"
+        info "Installed man page: ${man_dir}/$(basename "${page}")"
+    done
+fi
+
 # ── install data files ────────────────────────────────────────────────────────
 # incusbox-init is also installed to share_dir so incusbox-create can find it
 # when generating cloud-init user-data (the path may differ from bin_dir).

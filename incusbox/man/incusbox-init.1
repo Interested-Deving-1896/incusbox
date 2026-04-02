@@ -1,0 +1,82 @@
+.TH INCUSBOX-INIT 1 "2026" "incusbox 0.1.0" "User Commands"
+.SH NAME
+incusbox-init \- in-container setup script for incusbox
+.SH SYNOPSIS
+.B incusbox-init
+.SH DESCRIPTION
+.B incusbox-init
+runs inside a newly created incusbox container to set up the user environment.
+It is injected by
+.BR incusbox-create (1)
+either via cloud-init (for images that include it) or by direct exec-injection
+as a fallback.
+.PP
+It reads configuration from
+.I /etc/incusbox-container
+(written by
+.BR incusbox-create (1)
+before first boot) and performs the following steps:
+.IP \(bu 2
+Installs core packages:
+.BR sudo ", " bash ", " curl ", " wget ", " git ", " fuse-overlayfs .
+.IP \(bu 2
+Creates the host group and user inside the container with matching UID/GID.
+.IP \(bu 2
+Configures passwordless sudo for the user.
+.IP \(bu 2
+Creates the home directory and sets ownership.
+.IP \(bu 2
+Writes shell integration snippets to
+.I ~/.profile
+and
+.IR ~/.bashrc .
+.IP \(bu 2
+Creates XDG base directories
+.RI ( .config ", " .local/share ", " .cache ).
+.IP \(bu 2
+Writes
+.I /run/incusbox-ready
+to signal completion to
+.BR incusbox-enter (1).
+.SH CONFIGURATION
+.TP
+.I /etc/incusbox-container
+Shell-format key=value file sourced at startup. Recognised variables:
+.RS
+.TP
+.B INCUSBOX_HOST_USER
+Username to create inside the container.
+.TP
+.B INCUSBOX_HOST_UID / INCUSBOX_HOST_GID
+UID and GID for the created user.
+.TP
+.B INCUSBOX_HOST_HOME
+Host home directory path (used as the container home).
+.TP
+.B INCUSBOX_ADDITIONAL_PACKAGES
+Space-separated list of extra packages to install.
+.TP
+.B INCUSBOX_PRE_INIT_HOOK / INCUSBOX_INIT_HOOK
+Shell commands run before and after the main setup steps.
+.TP
+.B INCUSBOX_NVIDIA
+Set to
+.B 1
+to enable NVIDIA driver library bind-mounts.
+.RE
+.SH FILES
+.TP
+.I /etc/incusbox-container
+Container configuration written by
+.BR incusbox-create (1).
+.TP
+.I /run/incusbox-ready
+Created on successful completion; polled by
+.BR incusbox-enter (1).
+.TP
+.I /var/log/incusbox-init.log
+Log output from this script (when run via cloud-init runcmd).
+.SH SEE ALSO
+.BR incusbox (1),
+.BR incusbox-create (1),
+.BR incusbox-enter (1)

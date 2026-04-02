@@ -1,0 +1,84 @@
+.TH INCUSBOX-CREATE 1 "2026" "incusbox 0.1.0" "User Commands"
+.SH NAME
+incusbox-create \- create an incusbox container
+.SH SYNOPSIS
+.B incusbox create
+.RB [ \-n
+.IR NAME ]
+.RB [ \-i
+.IR IMAGE ]
+.RI [ OPTIONS ]
+.SH DESCRIPTION
+Creates and configures an Incus container for use with incusbox.
+The container is launched with the host user's home directory bind-mounted,
+UID/GID mapped, and
+.BR incusbox-init (1)
+injected to set up the user environment on first boot.
+.SH OPTIONS
+.TP
+.BI \-n " NAME" "\fR,\fP \-\-name " NAME
+Container name. Defaults to the image basename.
+.TP
+.BI \-i " IMAGE" "\fR,\fP \-\-image " IMAGE
+Image to use. Accepts Incus image aliases
+.RI ( images:alpine/3.20 )
+or OCI references
+.RI ( docker:ubuntu:24.04 ).
+Default:
+.IR images:ubuntu/24.04/cloud .
+.TP
+.BI \-H " HOME" "\fR,\fP \-\-home " HOME
+Override the home directory path inside the container.
+.TP
+.BI \-p " POOL" "\fR,\fP \-\-storage-pool " POOL
+Incus storage pool to use.
+.TP
+.B \-\-nvidia
+Enable NVIDIA GPU passthrough (applies
+.I incusbox-nvidia
+profile).
+.TP
+.B \-\-unshare-netns
+Give the container its own network namespace instead of sharing the host's.
+.TP
+.B \-\-unshare-ipc
+Give the container its own IPC namespace.
+.TP
+.B \-r ", " \-\-root
+Use rootful
+.BR incus (1)
+(via sudo).
+.TP
+.B \-v ", " \-\-verbose
+Show verbose output.
+.TP
+.B \-h ", " \-\-help
+Show help and exit.
+.SH CONTAINER METADATA
+The following
+.I user.*
+config keys are stored on the container and used by other incusbox commands:
+.PP
+.RS
+.TP
+.B user.manager=incusbox
+Marks the container as managed by incusbox.
+.TP
+.B user.incusbox.host_user
+Host username.
+.TP
+.B user.incusbox.host_uid / user.incusbox.host_gid
+Host UID and GID used for
+.I raw.idmap
+and user creation inside the container.
+.TP
+.B user.incusbox.distro
+Distro hint inferred from the image name; used by
+.BR incusbox-upgrade (1)
+to select the correct package manager without probing inside the container.
+.RE
+.SH SEE ALSO
+.BR incusbox (1),
+.BR incusbox-enter (1),
+.BR incusbox-init (1),
+.BR incus (1)

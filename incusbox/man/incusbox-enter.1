@@ -1,0 +1,48 @@
+.TH INCUSBOX-ENTER 1 "2026" "incusbox 0.1.0" "User Commands"
+.SH NAME
+incusbox-enter \- enter an incusbox container
+.SH SYNOPSIS
+.B incusbox enter
+.RI [ OPTIONS ]
+.I NAME
+.RI [ COMMAND
+.RI [ ARGS... ]]
+.SH DESCRIPTION
+Starts the named container if it is not already running, waits for
+.BR incusbox-init (1)
+to complete, then opens an interactive shell (or runs
+.IR COMMAND )
+inside the container as the host user.
+.PP
+The wait mechanism checks for
+.I /run/incusbox-ready
+(written by
+.BR incusbox-init (1)
+on completion). For containers using the exec-injection path (no cloud-init),
+this file is written synchronously before
+.B incusbox enter
+is called, so the wait returns immediately.
+.SH OPTIONS
+.TP
+.BI \-s " SHELL" "\fR,\fP \-\-shell " SHELL
+Shell to use inside the container. Defaults to the user's login shell.
+.TP
+.B \-\-no\-tty
+Disable TTY allocation (useful for scripting).
+.TP
+.B \-r ", " \-\-root
+Use rootful
+.BR incus (1).
+.TP
+.B \-v ", " \-\-verbose
+Show verbose output.
+.TP
+.B \-h ", " \-\-help
+Show help and exit.
+.SH EXIT STATUS
+Exits with the exit status of the command run inside the container.
+.SH SEE ALSO
+.BR incusbox (1),
+.BR incusbox-create (1),
+.BR incusbox-init (1),
+.BR incus-exec (1)
