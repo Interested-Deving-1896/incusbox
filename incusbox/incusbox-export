@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-export: export an application or service from inside an incusbox
 # container to the host. Adapted from distrobox-export.

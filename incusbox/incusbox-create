@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-create: create an incusbox container backed by Incus
 # Replaces distrobox-create; uses incus launch + cloud-init instead of

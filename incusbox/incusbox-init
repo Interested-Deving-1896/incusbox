@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-init: in-container setup script, injected via cloud-init.
 # Replaces distrobox-init. Runs once at first boot inside the container.
@@ -186,7 +186,8 @@ setup_nvidia() {
         [ -d "${lib_dir}" ] || continue
         find "${lib_dir}" -name 'libcuda*' -o -name 'libnvidia*' 2>/dev/null | \
         while read -r lib; do
-            local dest="/usr/lib/$(basename "$(dirname "${lib}")")/$(basename "${lib}")"
+            local dest
+            dest="/usr/lib/$(basename "$(dirname "${lib}")")/$(basename "${lib}")"
             [ -e "${dest}" ] || ln -sf "${lib}" "${dest}" 2>/dev/null || true
         done
     done

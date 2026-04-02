@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-upgrade: upgrade packages inside one or more incusbox containers
 

@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  syntax:
+    name: Shell syntax (sh -n)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check syntax of all incusbox scripts
+        run: |
+          failed=0
+          for f in incusbox/incusbox incusbox/incusbox-*; do
+            [ -f "$f" ] || continue
+            if bash -n "$f"; then
+              echo "OK:   $f"
+            else
+              echo "FAIL: $f"
+              failed=1
+            fi
+          done
+          exit $failed
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck on all incusbox scripts
+        run: |
+          failed=0
+          for f in incusbox/incusbox incusbox/incusbox-*; do
+            [ -f "$f" ] || continue
+            # SC1090: can't follow non-constant source — expected (config files)
+            # SC1091: not following sourced file — expected (config files)
+            # SC2034: unused variable — some vars set for sourcing by config
+            # SC2154: referenced but not assigned — vars come from sourced config
+            if shellcheck \
+                --shell=bash \
+                --severity=warning \
+                --exclude=SC1090,SC1091,SC2034,SC2154 \
+                "$f"; then
+              echo "OK:   $f"
+            else
+              echo "FAIL: $f"
+              failed=1
+            fi
+          done
+          exit $failed
+
+  install-dry-run:
+    name: Install script (dry run)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify install script is executable and parses cleanly
+        run: |
+          sh -n incusbox/install
+          echo "Install script syntax OK"
+
+      - name: Run install to ~/.local (no incus daemon needed)
+        run: |
+          # Runs the install script in user mode. Incus profile registration
+          # and OCI remote registration are skipped gracefully when incus is
+          # not present — this validates the install logic itself.
+          bash incusbox/install --user --verbose
+          # Verify executables landed in the right place
+          for exe in incusbox incusbox-create incusbox-enter incusbox-init \
+                     incusbox-export incusbox-host-exec incusbox-list \
+                     incusbox-rm incusbox-stop incusbox-upgrade; do
+            if [ -x "${HOME}/.local/bin/${exe}" ]; then
+              echo "OK:   ~/.local/bin/${exe}"
+            else
+              echo "FAIL: ~/.local/bin/${exe} not found or not executable"
+              exit 1
+            fi
+          done
+          # Verify profiles landed
+          for profile in incusbox-base incusbox-init incusbox-nvidia \
+                         incusbox-unshare-net incusbox-gui incusbox-rootless; do
+            if [ -f "${HOME}/.local/share/incusbox/profiles/${profile}.yaml" ]; then
+              echo "OK:   profile ${profile}.yaml"
+            else
+              echo "FAIL: profile ${profile}.yaml not found"
+              exit 1
+            fi
+          done
+
+  profile-yaml:
+    name: Validate profile YAML
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Validate all profile YAML files
+        run: |
+          failed=0
+          for f in incusbox/profiles/*.yaml; do
+            [ -f "$f" ] || continue
+            if yq eval '.' "$f" > /dev/null 2>&1; then
+              echo "OK:   $f"
+            else
+              echo "FAIL: $f"
+              yq eval '.' "$f" || true
+              failed=1
+            fi
+          done
+          exit $failed
