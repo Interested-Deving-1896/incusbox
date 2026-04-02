@@ -386,9 +386,10 @@ jobs:
           # /run/host/usr/local is not visible via the non-recursive source=/ mount).
           sudo incus file push incusbox/incusbox-export \
             ci-test/usr/local/bin/incusbox-export --mode 0755
+          # Use /bin/sh — guaranteed present in any Alpine container.
           sudo incus exec ci-test -- \
-            /usr/local/bin/incusbox-export --bin /usr/bin/git
-          wrapper="${HOME}/.local/bin/git"
+            /usr/local/bin/incusbox-export --bin /bin/sh
+          wrapper="${HOME}/.local/bin/sh"
           [ -f "${wrapper}" ] || { echo "FAIL: exported wrapper not found at ${wrapper}"; exit 1; }
           echo "Wrapper contents:"
           cat "${wrapper}"
