@@ -1,0 +1,19 @@
+name: incusbox-unshare-net
+description: Isolated network namespace for incusbox containers
+config:
+  # When this profile is applied the container gets its own network namespace
+  # with a managed bridge NIC instead of sharing the host's network stack.
+  # The base profile's raw.lxc "lxc.net.0.type = none" is NOT applied here.
+  raw.lxc: |
+    lxc.apparmor.profile = unconfined
+    lxc.cap.drop =
+    lxc.cgroup.devices.allow = a
+
+devices:
+  # Managed bridge NIC — Incus will assign an IP via its built-in DHCP.
+  # Replace "incusbr0" with your bridge name if different.
+  eth0:
+    type: nic
+    nictype: bridged
+    parent: incusbr0
+    name: eth0

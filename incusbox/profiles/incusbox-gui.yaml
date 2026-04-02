@@ -1,0 +1,57 @@
+name: incusbox-gui
+description: GUI application support (X11 + Wayland + audio) for incusbox containers
+# Pattern derived from eliranwong/incus_container_gui_setup and blincus.
+# Apply this profile when you want to run graphical apps from the container
+# on the host's display.
+config:
+  raw.lxc: |
+    lxc.apparmor.profile = unconfined
+    lxc.cap.drop =
+    lxc.cgroup.devices.allow = a
+
+devices:
+  # X11 socket — for X11 applications
+  x11-socket:
+    type: disk
+    source: /tmp/.X11-unix
+    path: /tmp/.X11-unix
+
+  # Wayland socket — for native Wayland applications.
+  # The socket name varies; WAYLAND_DISPLAY is usually wayland-0 or wayland-1.
+  wayland-socket:
+    type: disk
+    source: /run/user/1000/wayland-0
+    path: /run/user/1000/wayland-0
+    optional: "true"
+
+  # PipeWire socket — modern audio/video routing
+  pipewire-socket:
+    type: disk
+    source: /run/user/1000/pipewire-0
+    path: /run/user/1000/pipewire-0
+    optional: "true"
+
+  # PulseAudio socket — legacy audio
+  pulse-socket:
+    type: disk
+    source: /run/user/1000/pulse/native
+    path: /run/user/1000/pulse/native
+    optional: "true"
+
+  # DRI devices — GPU rendering (Intel/AMD/software)
+  dri:
+    type: gpu
+    gputype: drm
+
+  # /dev/shm — shared memory, required by many GUI toolkits (Qt, Electron)
+  shm:
+    type: disk
+    source: /dev/shm
+    path: /dev/shm
+
+  # Input devices — for applications that need direct input access
+  input:
+    type: disk
+    source: /dev/input
+    path: /dev/input
+    optional: "true"

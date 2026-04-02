@@ -1,0 +1,104 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox: top-level dispatcher
+# Routes subcommands to the appropriate incusbox-* script.
+
+set -e
+
+version="0.1.0"
+
+# ── locate script directory ───────────────────────────────────────────────────
+# Resolve symlinks so we find the real script directory even when incusbox
+# is invoked via a symlink in /usr/local/bin.
+self="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+script_dir="$(dirname "${self}")"
+
+show_help() {
+    cat <<EOF
+incusbox version: ${version}
+
+Use any Linux distribution inside your terminal via Incus system containers.
+Provides tight host integration: shared HOME, X11/Wayland, audio, GPU, USB.
+
+Usage:
+  incusbox COMMAND [OPTIONS] [ARGS...]
+
+Commands:
+  create      Create a new incusbox container
+  enter       Enter an existing incusbox container
+  list        List incusbox containers
+  rm          Remove an incusbox container
+  stop        Stop one or more incusbox containers
+  upgrade     Upgrade packages inside a container
+  export      Export an app/binary/service from inside a container
+  host-exec   Run a host command from inside a container
+
+  version     Show version
+  help        Show this help
+
+Run 'incusbox COMMAND --help' for command-specific options.
+
+Examples:
+  incusbox create --image docker:ubuntu:22.04 --name mybox
+  incusbox enter mybox
+  incusbox create --image images:fedora/40 --name fedbox --nvidia
+  incusbox create --image docker:archlinux --name arch --storage-pool tank
+  incusbox list
+  incusbox rm mybox
+EOF
+}
+
+show_version() {
+    printf 'incusbox %s\n' "${version}"
+}
+
+# ── find and exec subcommand script ──────────────────────────────────────────
+run_subcommand() {
+    local cmd="$1"
+    shift
+
+    # Look for incusbox-CMD in the same directory as this script first,
+    # then fall back to PATH.
+    local script="${script_dir}/incusbox-${cmd}"
+    if [ ! -x "${script}" ]; then
+        script="$(command -v "incusbox-${cmd}" 2>/dev/null || true)"
+    fi
+
+    if [ -z "${script}" ] || [ ! -x "${script}" ]; then
+        printf >&2 "incusbox: unknown command '%s'\n" "${cmd}"
+        printf >&2 "Run 'incusbox help' for usage.\n"
+        exit 1
+    fi
+
+    exec "${script}" "$@"
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+cmd="$1"
+shift
+
+case "${cmd}" in
+    # Core commands
+    create)    run_subcommand create    "$@" ;;
+    enter)     run_subcommand enter     "$@" ;;
+    list|ls)   run_subcommand list      "$@" ;;
+    rm|remove) run_subcommand rm        "$@" ;;
+    stop)      run_subcommand stop      "$@" ;;
+    upgrade)   run_subcommand upgrade   "$@" ;;
+
+    # In-container commands (also callable from host for scripting)
+    export)    run_subcommand export    "$@" ;;
+    host-exec) run_subcommand host-exec "$@" ;;
+
+    # Meta
+    version|-V|--version) show_version ;;
+    help|-h|--help)       show_help ;;
+
+    # Unknown
+    *)
+        printf >&2 "incusbox: unknown command '%s'\n" "${cmd}"
+        printf >&2 "Run 'incusbox help' for usage.\n"
+        exit 1 ;;
+esac

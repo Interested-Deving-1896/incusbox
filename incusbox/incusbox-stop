@@ -1,0 +1,99 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-stop: stop one or more incusbox containers
+
+set -e
+
+[ -z "${USER}" ] && USER="$(id -run)"
+[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+
+rootful=0
+all=0
+verbose=0
+version="0.1.0"
+
+config_files="
+/usr/share/incusbox/incusbox.conf
+/usr/local/share/incusbox/incusbox.conf
+/etc/incusbox/incusbox.conf
+${XDG_CONFIG_HOME:-"${HOME}/.config"}/incusbox/incusbox.conf
+${HOME}/.incusboxrc
+"
+for _cf in ${config_files}; do
+    # shellcheck disable=SC1090
+    [ -e "${_cf}" ] && . "$(realpath "${_cf}")"
+done
+
+log()  { printf >&2 '%s\n' "$*"; }
+die()  { printf >&2 'Error: %s\n' "$*"; exit 1; }
+info() { [ "${verbose}" -eq 1 ] && printf >&2 '+ %s\n' "$*"; }
+
+show_help() {
+    cat <<EOF
+incusbox version: ${version}
+
+Usage:
+  incusbox stop [OPTIONS] [NAME...]
+
+Options:
+  -a, --all      Stop all running incusbox containers
+  -r, --root     Use rootful incus
+  -v, --verbose  Show verbose output
+  -V, --version  Show version
+  -h, --help     Show this help
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -a|--all)     all=1;                      shift ;;
+        -r|--root)    rootful=1;                  shift ;;
+        -v|--verbose) verbose=1;                  shift ;;
+        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)    show_help; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *)  break ;;
+    esac
+done
+
+if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
+    INCUS="sudo incus"
+else
+    INCUS="incus"
+fi
+
+command -v incus >/dev/null 2>&1 || die "'incus' not found in PATH"
+
+stop_container() {
+    local name="$1"
+    local status
+    status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
+    if [ "${status}" = "running" ]; then
+        info "Stopping ${name}..."
+        ${INCUS} stop "${name}" && log "Stopped '${name}'." || \
+            log "Warning: failed to stop '${name}'"
+    else
+        log "'${name}' is not running (status: ${status})"
+    fi
+}
+
+if [ "${all}" -eq 1 ]; then
+    ${INCUS} list --format csv 2>/dev/null | while IFS=',' read -r name status _rest; do
+        manager="$(${INCUS} config get "${name}" user.manager 2>/dev/null || true)"
+        [ "${manager}" = "incusbox" ] || continue
+        [ "${status}" = "RUNNING" ] || continue
+        stop_container "${name}"
+    done
+    exit 0
+fi
+
+[ "$#" -eq 0 ] && die "Container name required. Usage: incusbox stop NAME [NAME...]"
+
+for container_name in "$@"; do
+    if ! ${INCUS} info "${container_name}" >/dev/null 2>&1; then
+        log "Container '${container_name}' not found, skipping."
+        continue
+    fi
+    stop_container "${container_name}"
+done

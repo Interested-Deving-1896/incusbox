@@ -1,0 +1,312 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-init: in-container setup script, injected via cloud-init.
+# Replaces distrobox-init. Runs once at first boot inside the container.
+#
+# Reads configuration from /etc/incusbox-container (written by cloud-init).
+# Signals completion by writing /run/incusbox-ready.
+
+set -e
+
+# ── load config ───────────────────────────────────────────────────────────────
+[ -f /etc/incusbox-container ] && . /etc/incusbox-container
+
+INCUSBOX_HOST_USER="${INCUSBOX_HOST_USER:-root}"
+INCUSBOX_HOST_UID="${INCUSBOX_HOST_UID:-0}"
+INCUSBOX_HOST_GID="${INCUSBOX_HOST_GID:-0}"
+INCUSBOX_HOST_HOME="${INCUSBOX_HOST_HOME:-/root}"
+INCUSBOX_CONTAINER_HOME="${INCUSBOX_CONTAINER_HOME:-${INCUSBOX_HOST_HOME}}"
+INCUSBOX_ADDITIONAL_PACKAGES="${INCUSBOX_ADDITIONAL_PACKAGES:-}"
+INCUSBOX_PRE_INIT_HOOK="${INCUSBOX_PRE_INIT_HOOK:-}"
+INCUSBOX_INIT_HOOK="${INCUSBOX_INIT_HOOK:-}"
+INCUSBOX_INIT="${INCUSBOX_INIT:-0}"
+INCUSBOX_NVIDIA="${INCUSBOX_NVIDIA:-0}"
+
+log()  { printf 'incusbox: %s\n' "$*"; }
+die()  { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+# ── detect distro ─────────────────────────────────────────────────────────────
+detect_distro() {
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        printf '%s' "${ID:-unknown}"
+    elif [ -f /etc/debian_version ]; then
+        printf 'debian'
+    elif [ -f /etc/fedora-release ]; then
+        printf 'fedora'
+    elif [ -f /etc/arch-release ]; then
+        printf 'arch'
+    elif [ -f /etc/alpine-release ]; then
+        printf 'alpine'
+    else
+        printf 'unknown'
+    fi
+}
+
+DISTRO="$(detect_distro)"
+
+# ── package manager helpers ───────────────────────────────────────────────────
+pkg_install() {
+    case "${DISTRO}" in
+        ubuntu|debian|linuxmint|pop)
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@" ;;
+        fedora|rhel|centos|almalinux|rocky)
+            dnf install -y "$@" 2>/dev/null || yum install -y "$@" ;;
+        arch|manjaro|endeavouros)
+            pacman -Sy --noconfirm "$@" ;;
+        alpine)
+            apk add --no-cache "$@" ;;
+        opensuse*|sles)
+            zypper install -y "$@" ;;
+        void)
+            xbps-install -Sy "$@" ;;
+        gentoo)
+            emerge --ask=n "$@" ;;
+        nixos)
+            log "NixOS: skipping package install (use nix-env or shell.nix)" ;;
+        *)
+            log "Warning: unknown distro '${DISTRO}', skipping package install" ;;
+    esac
+}
+
+pkg_update() {
+    case "${DISTRO}" in
+        ubuntu|debian|linuxmint|pop)
+            DEBIAN_FRONTEND=noninteractive apt-get update -y ;;
+        fedora|rhel|centos|almalinux|rocky)
+            dnf check-update -y 2>/dev/null || true ;;
+        arch|manjaro|endeavouros)
+            pacman -Sy ;;
+        alpine)
+            apk update ;;
+        opensuse*|sles)
+            zypper refresh ;;
+        void)
+            xbps-install -Su ;;
+        *)
+            true ;;
+    esac
+}
+
+# ── core dependency packages ──────────────────────────────────────────────────
+# Minimal set needed for incusbox to function inside any container.
+core_packages() {
+    case "${DISTRO}" in
+        ubuntu|debian|linuxmint|pop)
+            printf 'sudo bash curl wget less procps passwd util-linux' ;;
+        fedora|rhel|centos|almalinux|rocky)
+            printf 'sudo bash curl wget less procps-ng shadow-utils util-linux' ;;
+        arch|manjaro|endeavouros)
+            printf 'sudo bash curl wget less procps-ng shadow util-linux' ;;
+        alpine)
+            printf 'sudo bash curl wget less procps shadow util-linux' ;;
+        opensuse*|sles)
+            printf 'sudo bash curl wget less procps shadow util-linux' ;;
+        void)
+            printf 'sudo bash curl wget less procps shadow util-linux' ;;
+        *)
+            printf 'sudo bash' ;;
+    esac
+}
+
+# ── user setup ────────────────────────────────────────────────────────────────
+setup_user() {
+    log "Setting up user ${INCUSBOX_HOST_USER} (uid=${INCUSBOX_HOST_UID} gid=${INCUSBOX_HOST_GID})"
+
+    # Create group if it doesn't exist
+    if ! getent group "${INCUSBOX_HOST_GID}" >/dev/null 2>&1; then
+        groupadd --gid "${INCUSBOX_HOST_GID}" "${INCUSBOX_HOST_USER}" 2>/dev/null || true
+    fi
+
+    # Create user if it doesn't exist
+    if ! getent passwd "${INCUSBOX_HOST_USER}" >/dev/null 2>&1; then
+        useradd \
+            --uid "${INCUSBOX_HOST_UID}" \
+            --gid "${INCUSBOX_HOST_GID}" \
+            --home-dir "${INCUSBOX_CONTAINER_HOME}" \
+            --no-create-home \
+            --shell /bin/bash \
+            "${INCUSBOX_HOST_USER}" 2>/dev/null || true
+    fi
+
+    # Ensure home directory exists and is owned correctly
+    mkdir -p "${INCUSBOX_CONTAINER_HOME}"
+    chown "${INCUSBOX_HOST_UID}:${INCUSBOX_HOST_GID}" "${INCUSBOX_CONTAINER_HOME}" || true
+
+    # NOPASSWD sudo
+    local sudoers_file="/etc/sudoers.d/incusbox-${INCUSBOX_HOST_USER}"
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "${INCUSBOX_HOST_USER}" > "${sudoers_file}"
+    chmod 0440 "${sudoers_file}"
+
+    # Also add to wheel/sudo groups if they exist
+    for grp in sudo wheel adm; do
+        getent group "${grp}" >/dev/null 2>&1 && \
+            usermod -aG "${grp}" "${INCUSBOX_HOST_USER}" 2>/dev/null || true
+    done
+}
+
+# ── /etc/passwd and /etc/group sync ──────────────────────────────────────────
+# Keep a copy of the host's passwd/group entries so tools like `id` work
+# correctly when the host home is bind-mounted.
+sync_host_passwd() {
+    # The host's /etc/passwd is visible at /run/host/etc/passwd
+    [ -f /run/host/etc/passwd ] || return 0
+
+    # Append any host users not already in the container's passwd
+    while IFS= read -r line; do
+        local uname
+        uname="$(printf '%s' "${line}" | cut -d: -f1)"
+        grep -q "^${uname}:" /etc/passwd 2>/dev/null || \
+            printf '%s\n' "${line}" >> /etc/passwd
+    done < /run/host/etc/passwd
+
+    [ -f /run/host/etc/group ] || return 0
+    while IFS= read -r line; do
+        local gname
+        gname="$(printf '%s' "${line}" | cut -d: -f1)"
+        grep -q "^${gname}:" /etc/group 2>/dev/null || \
+            printf '%s\n' "${line}" >> /etc/group
+    done < /run/host/etc/group
+}
+
+# ── /etc/localtime sync ───────────────────────────────────────────────────────
+sync_timezone() {
+    [ -f /run/host/etc/localtime ] || return 0
+    ln -sf /run/host/etc/localtime /etc/localtime 2>/dev/null || true
+}
+
+# ── NVIDIA setup ──────────────────────────────────────────────────────────────
+setup_nvidia() {
+    [ "${INCUSBOX_NVIDIA}" = "1" ] || return 0
+    log "Configuring NVIDIA driver integration"
+
+    # Bind-mount host NVIDIA libraries if present
+    for lib_dir in /run/host/usr/lib/x86_64-linux-gnu /run/host/usr/lib64; do
+        [ -d "${lib_dir}" ] || continue
+        find "${lib_dir}" -name 'libcuda*' -o -name 'libnvidia*' 2>/dev/null | \
+        while read -r lib; do
+            local dest
+            dest="/usr/lib/$(basename "$(dirname "${lib}")")/$(basename "${lib}")"
+            [ -e "${dest}" ] || ln -sf "${lib}" "${dest}" 2>/dev/null || true
+        done
+    done
+
+    # Ensure /dev/nvidia* devices are accessible
+    for dev in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia-modeset; do
+        [ -e "${dev}" ] && chmod a+rw "${dev}" 2>/dev/null || true
+    done
+}
+
+# ── systemd / init setup ──────────────────────────────────────────────────────
+setup_init_system() {
+    [ "${INCUSBOX_INIT}" = "1" ] || return 0
+    log "Configuring init system support"
+
+    # Mount tmpfs on paths systemd expects
+    for path in /run /run/lock /tmp /var/lib/journal; do
+        mountpoint -q "${path}" 2>/dev/null || \
+            mount -t tmpfs tmpfs "${path}" 2>/dev/null || true
+    done
+
+    # Enable lingering for the user so systemd --user starts at boot
+    command -v loginctl >/dev/null 2>&1 && \
+        loginctl enable-linger "${INCUSBOX_HOST_USER}" 2>/dev/null || true
+}
+
+# ── shell integration ─────────────────────────────────────────────────────────
+# Write a minimal .bashrc / .profile addition so the container feels like
+# a normal login shell with the right environment.
+setup_shell_integration() {
+    local rc_file="${INCUSBOX_CONTAINER_HOME}/.bashrc"
+    local profile_file="${INCUSBOX_CONTAINER_HOME}/.profile"
+
+    # Only write if the user's home is writable
+    [ -w "${INCUSBOX_CONTAINER_HOME}" ] || return 0
+
+    # Append incusbox env block if not already present
+    if ! grep -q 'INCUSBOX' "${rc_file}" 2>/dev/null; then
+        cat >> "${rc_file}" <<'RCBLOCK'
+
+# incusbox environment
+export INCUSBOX=1
+export CONTAINER_ID="${CONTAINER_ID:-incusbox}"
+# Make host executables available via distrobox-host-exec
+alias host-exec='incusbox-host-exec'
+# Ensure terminfo from host is available
+export TERMINFO_DIRS="${TERMINFO_DIRS:-/usr/share/terminfo:/run/host/usr/share/terminfo}"
+RCBLOCK
+    fi
+
+    # Ensure .profile sources .bashrc for login shells
+    if ! grep -q '.bashrc' "${profile_file}" 2>/dev/null; then
+        cat >> "${profile_file}" <<'PROFBLOCK'
+[ -f "${HOME}/.bashrc" ] && . "${HOME}/.bashrc"
+PROFBLOCK
+    fi
+
+    chown "${INCUSBOX_HOST_UID}:${INCUSBOX_HOST_GID}" \
+        "${rc_file}" "${profile_file}" 2>/dev/null || true
+}
+
+# ── XDG dirs ──────────────────────────────────────────────────────────────────
+setup_xdg_dirs() {
+    local xdg_data="${INCUSBOX_CONTAINER_HOME}/.local/share"
+    local xdg_config="${INCUSBOX_CONTAINER_HOME}/.config"
+    local xdg_cache="${INCUSBOX_CONTAINER_HOME}/.cache"
+
+    for d in "${xdg_data}" "${xdg_config}" "${xdg_cache}"; do
+        mkdir -p "${d}"
+        chown "${INCUSBOX_HOST_UID}:${INCUSBOX_HOST_GID}" "${d}" 2>/dev/null || true
+    done
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+main() {
+    log "Starting incusbox-init for container ${INCUSBOX_CONTAINER_NAME:-unknown}"
+
+    # Pre-init hook
+    if [ -n "${INCUSBOX_PRE_INIT_HOOK}" ]; then
+        log "Running pre-init hook"
+        eval "${INCUSBOX_PRE_INIT_HOOK}" || log "Warning: pre-init hook exited non-zero"
+    fi
+
+    # Package setup
+    log "Updating package index"
+    pkg_update 2>/dev/null || log "Warning: package update failed (continuing)"
+
+    log "Installing core packages"
+    # shellcheck disable=SC2046
+    pkg_install $(core_packages) 2>/dev/null || \
+        log "Warning: some core packages failed to install"
+
+    # Additional packages requested by user
+    if [ -n "${INCUSBOX_ADDITIONAL_PACKAGES}" ]; then
+        log "Installing additional packages: ${INCUSBOX_ADDITIONAL_PACKAGES}"
+        # shellcheck disable=SC2086
+        pkg_install ${INCUSBOX_ADDITIONAL_PACKAGES} || \
+            log "Warning: some additional packages failed to install"
+    fi
+
+    # User setup
+    setup_user
+    sync_host_passwd
+    sync_timezone
+    setup_init_system
+    setup_nvidia
+    setup_shell_integration
+    setup_xdg_dirs
+
+    # Post-init hook
+    if [ -n "${INCUSBOX_INIT_HOOK}" ]; then
+        log "Running init hook"
+        eval "${INCUSBOX_INIT_HOOK}" || log "Warning: init hook exited non-zero"
+    fi
+
+    # Signal readiness — incusbox-enter polls for this file
+    touch /run/incusbox-ready
+    log "incusbox-init complete"
+    printf 'container_setup_done\n'
+}
+
+main "$@"

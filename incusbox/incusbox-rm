@@ -1,0 +1,181 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-rm: remove an incusbox container (and optionally its ZFS/Btrfs storage)
+
+set -e
+
+[ -z "${USER}" ] && USER="$(id -run)"
+[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+
+rootful=0
+non_interactive=0
+force=0
+rm_home=0
+verbose=0
+version="0.1.0"
+
+config_files="
+/usr/share/incusbox/incusbox.conf
+/usr/local/share/incusbox/incusbox.conf
+/etc/incusbox/incusbox.conf
+${XDG_CONFIG_HOME:-"${HOME}/.config"}/incusbox/incusbox.conf
+${HOME}/.incusboxrc
+"
+for _cf in ${config_files}; do
+    # shellcheck disable=SC1090
+    [ -e "${_cf}" ] && . "$(realpath "${_cf}")"
+done
+
+log()  { printf >&2 '%s\n' "$*"; }
+die()  { printf >&2 'Error: %s\n' "$*"; exit 1; }
+info() { [ "${verbose}" -eq 1 ] && printf >&2 '+ %s\n' "$*"; }
+
+show_help() {
+    cat <<EOF
+incusbox version: ${version}
+
+Usage:
+  incusbox rm [OPTIONS] NAME [NAME...]
+
+Options:
+  -f, --force        Force removal even if running
+      --rm-home      Also remove the container's custom home directory
+                     (ZFS dataset or Btrfs subvolume if applicable)
+  -r, --root         Use rootful incus
+  -Y, --yes          Non-interactive (skip confirmation)
+  -v, --verbose      Show verbose output
+  -V, --version      Show version
+  -h, --help         Show this help
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -f|--force)   force=1;                    shift ;;
+        --rm-home)    rm_home=1;                  shift ;;
+        -r|--root)    rootful=1;                  shift ;;
+        -Y|--yes)     non_interactive=1;          shift ;;
+        -v|--verbose) verbose=1;                  shift ;;
+        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)    show_help; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *)  break ;;
+    esac
+done
+
+[ "$#" -eq 0 ] && die "Container name required. Usage: incusbox rm NAME"
+
+if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
+    INCUS="sudo incus"
+else
+    INCUS="incus"
+fi
+
+command -v incus >/dev/null 2>&1 || die "'incus' not found in PATH"
+
+remove_container() {
+    local name="$1"
+
+    # Verify it's an incusbox container
+    local manager
+    manager="$(${INCUS} config get "${name}" user.manager 2>/dev/null || true)"
+    if [ "${manager}" != "incusbox" ]; then
+        log "Warning: '${name}' does not appear to be an incusbox container (user.manager=${manager})"
+        if [ "${non_interactive}" -eq 0 ]; then
+            printf >&2 "Remove anyway? [y/N]: "
+            read -r response
+            case "${response}" in
+                y|Y|yes|Yes|YES) ;;
+                *) log "Skipping ${name}"; return 0 ;;
+            esac
+        fi
+    fi
+
+    # Confirmation
+    if [ "${non_interactive}" -eq 0 ] && [ "${force}" -eq 0 ]; then
+        printf >&2 "Remove container '%s'? [y/N]: " "${name}"
+        read -r response
+        case "${response}" in
+            y|Y|yes|Yes|YES) ;;
+            *) log "Skipping ${name}"; return 0 ;;
+        esac
+    fi
+
+    # Read custom home before deletion
+    local custom_home
+    custom_home="$(${INCUS} config get "${name}" user.incusbox.container_home 2>/dev/null || true)"
+    local host_home
+    host_home="$(${INCUS} config get "${name}" user.incusbox.host_home 2>/dev/null || true)"
+
+    # Stop if running
+    local status
+    status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
+    if [ "${status}" = "running" ]; then
+        info "Stopping ${name}..."
+        ${INCUS} stop "${name}" --force 2>/dev/null || true
+    fi
+
+    # Delete container
+    info "Deleting container ${name}..."
+    ${INCUS} delete "${name}" ${force:+--force} || die "Failed to delete container ${name}"
+    log "Container '${name}' removed."
+
+    # Optionally remove custom home storage
+    if [ "${rm_home}" -eq 1 ] && [ -n "${custom_home}" ] && \
+       [ "${custom_home}" != "${host_home}" ]; then
+
+        # ZFS dataset?
+        if command -v zfs >/dev/null 2>&1 && \
+           zfs list "${custom_home}" >/dev/null 2>&1; then
+            if [ "${non_interactive}" -eq 0 ]; then
+                printf >&2 "Destroy ZFS dataset '%s'? [y/N]: " "${custom_home}"
+                read -r response
+                case "${response}" in
+                    y|Y|yes|Yes|YES) ;;
+                    *) return 0 ;;
+                esac
+            fi
+            info "Destroying ZFS dataset ${custom_home}"
+            zfs destroy -r "${custom_home}" || \
+                log "Warning: failed to destroy ZFS dataset ${custom_home}"
+
+        # Btrfs subvolume?
+        elif command -v btrfs >/dev/null 2>&1 && \
+             btrfs subvolume show "${custom_home}" >/dev/null 2>&1; then
+            if [ "${non_interactive}" -eq 0 ]; then
+                printf >&2 "Delete Btrfs subvolume '%s'? [y/N]: " "${custom_home}"
+                read -r response
+                case "${response}" in
+                    y|Y|yes|Yes|YES) ;;
+                    *) return 0 ;;
+                esac
+            fi
+            info "Deleting Btrfs subvolume ${custom_home}"
+            btrfs subvolume delete "${custom_home}" || \
+                log "Warning: failed to delete Btrfs subvolume ${custom_home}"
+
+        # Plain directory
+        elif [ -d "${custom_home}" ]; then
+            if [ "${non_interactive}" -eq 0 ]; then
+                printf >&2 "Remove directory '%s'? [y/N]: " "${custom_home}"
+                read -r response
+                case "${response}" in
+                    y|Y|yes|Yes|YES) ;;
+                    *) return 0 ;;
+                esac
+            fi
+            info "Removing directory ${custom_home}"
+            rm -rf "${custom_home}" || \
+                log "Warning: failed to remove directory ${custom_home}"
+        fi
+    fi
+}
+
+for container_name in "$@"; do
+    if ! ${INCUS} info "${container_name}" >/dev/null 2>&1; then
+        log "Container '${container_name}' not found, skipping."
+        continue
+    fi
+    remove_container "${container_name}"
+done

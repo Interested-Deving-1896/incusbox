@@ -1,0 +1,69 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-host-exec: execute a command on the host from inside an incusbox container.
+# Adapted from distrobox-host-exec.
+#
+# This script is bind-mounted read-only into the container at
+# /usr/local/bin/incusbox-host-exec by incusbox-create.
+#
+# Inside the container, the host root filesystem is available at /run/host.
+# We use nsenter to escape the container's namespaces and run the command
+# in the host's context.
+
+set -e
+
+# ── detect if we are inside a container ──────────────────────────────────────
+if [ ! -f /run/incusbox-ready ] && [ -z "${INCUSBOX}" ]; then
+    printf >&2 'incusbox-host-exec: not running inside an incusbox container\n'
+    exit 1
+fi
+
+show_help() {
+    cat <<EOF
+incusbox-host-exec: run a command on the host from inside an incusbox container
+
+Usage:
+  incusbox-host-exec COMMAND [ARGS...]
+
+Examples:
+  incusbox-host-exec flatpak run org.mozilla.firefox
+  incusbox-host-exec systemctl --user status
+  incusbox-host-exec bash
+
+The command is executed in the host's mount, network, PID, and UTS namespaces.
+EOF
+}
+
+case "$1" in
+    -h|--help) show_help; exit 0 ;;
+    "") show_help; exit 1 ;;
+esac
+
+# ── find the host PID 1 to nsenter into ──────────────────────────────────────
+# The host's PID 1 is visible from inside the container because we share
+# the PID namespace (lxc.namespace.share.pid = 1 in raw.lxc).
+# If PID namespace is unshared, fall back to /run/host chroot approach.
+
+HOST_PID1_NS="/proc/1/ns"
+
+if [ -d "${HOST_PID1_NS}" ]; then
+    # Use nsenter to run in host namespaces.
+    # -m: mount namespace  -u: UTS  -i: IPC  -n: network  -p: PID
+    # We do NOT enter the user namespace (-U) as that would drop privileges.
+    exec nsenter \
+        --mount="${HOST_PID1_NS}/mnt" \
+        --uts="${HOST_PID1_NS}/uts" \
+        --ipc="${HOST_PID1_NS}/ipc" \
+        --net="${HOST_PID1_NS}/net" \
+        --pid="${HOST_PID1_NS}/pid" \
+        --target=1 \
+        -- "$@"
+else
+    # Fallback: chroot into /run/host and exec there.
+    # This works when PID namespace is unshared but /run/host is mounted.
+    if [ ! -d /run/host ]; then
+        printf >&2 'incusbox-host-exec: /run/host not found — is the host root mounted?\n'
+        exit 1
+    fi
+    exec chroot /run/host "$@"
+fi
