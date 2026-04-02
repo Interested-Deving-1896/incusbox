@@ -284,10 +284,13 @@ jobs:
           INCUSBOX_INIT=0
           INCUSBOX_NVIDIA=0
           CONF
-          # Push and run incusbox-init synchronously
+          # Ensure bash is available (Alpine ships ash by default)
+          sudo incus exec ci-test -- sh -c \
+            'command -v bash >/dev/null 2>&1 || apk add --no-cache bash >/dev/null 2>&1 || true'
+          # Push and run incusbox-init synchronously via bash
           sudo incus file push incusbox/incusbox-init \
             ci-test/usr/local/bin/incusbox-init --mode 0755
-          sudo incus exec ci-test -- /usr/local/bin/incusbox-init
+          sudo incus exec ci-test -- bash /usr/local/bin/incusbox-init
           echo "incusbox-init exit code: $?"
 
       - name: Verify user exists inside container
