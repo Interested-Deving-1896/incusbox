@@ -377,3 +377,179 @@ jobs:
           sudo incus exec ci-test -- cat /var/log/incusbox-init.log 2>/dev/null || true
           echo "=== cloud-init status ==="
           sudo incus exec ci-test -- cloud-init status --long 2>/dev/null || true
+
+  # ── cloud-init path: Debian/Ubuntu ──────────────────────────────────────────
+  # Tests the cloud-init injection path used by incusbox-create for images that
+  # ship cloud-init (Debian, Ubuntu, Fedora, etc.). Complements the Alpine job
+  # which tests the direct exec-injection fallback path.
+  integration-cloudinit:
+    name: Integration (cloud-init / Debian)
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Incus
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y incus
+          sudo adduser "$USER" incus-admin || true
+          sudo adduser "$USER" incus || true
+
+      - name: Initialise Incus (minimal preseed)
+        run: |
+          cat > /tmp/incus-preseed.yaml << 'EOF'
+          config: {}
+          networks:
+          - name: incusbr0
+            type: bridge
+            config:
+              ipv4.address: 10.211.55.1/24
+              ipv4.nat: "true"
+              ipv6.address: none
+          storage_pools:
+          - name: default
+            driver: dir
+          profiles:
+          - name: default
+            devices:
+              root:
+                path: /
+                pool: default
+                type: disk
+              eth0:
+                name: eth0
+                nictype: bridged
+                parent: incusbr0
+                type: nic
+          EOF
+          sudo incus admin init --preseed < /tmp/incus-preseed.yaml
+
+      - name: Install incusbox
+        run: sudo bash incusbox/install --prefix /usr/local --verbose
+
+      - name: Register incusbox profiles
+        run: |
+          for yaml in incusbox/profiles/*.yaml; do
+            name="$(basename "${yaml}" .yaml)"
+            sudo incus profile show "${name}" >/dev/null 2>&1 && continue
+            sudo incus profile create "${name}" < "${yaml}"
+            echo "Created profile: ${name}"
+          done
+
+      - name: Pull Debian image
+        run: |
+          pulled=0
+          for alias in "debian/12" "debian/11" "debian/bookworm" "debian/bullseye"; do
+            if sudo incus image copy "images:${alias}" local: \
+                --alias ci-debian --auto-update=false 2>/dev/null; then
+              echo "Pulled: images:${alias}"
+              pulled=1
+              break
+            fi
+          done
+          [ "${pulled}" -eq 1 ] || { echo "Could not pull Debian image"; exit 1; }
+          sudo incus image list local: --format csv
+
+      - name: Generate cloud-init user-data and launch container
+        run: |
+          uid="$(id -ru)"
+          gid="$(id -rg)"
+          user="$(id -run)"
+          home="${HOME}"
+
+          # Encode incusbox-init as base64 for embedding in cloud-init write_files
+          init_b64="$(base64 -w0 incusbox/incusbox-init)"
+
+          # Build cloud-init user-data — mirrors what incusbox-create generates
+          cat > /tmp/cloud-init.yaml << EOF
+          #cloud-config
+          write_files:
+          - path: /etc/incusbox-container
+            permissions: '0644'
+            content: |
+              INCUSBOX_CONTAINER_NAME=ci-debian
+              INCUSBOX_HOST_USER=${user}
+              INCUSBOX_HOST_UID=${uid}
+              INCUSBOX_HOST_GID=${gid}
+              INCUSBOX_HOST_HOME=${home}
+              INCUSBOX_CONTAINER_HOME=${home}
+              INCUSBOX_ADDITIONAL_PACKAGES=
+              INCUSBOX_PRE_INIT_HOOK=
+              INCUSBOX_INIT_HOOK=
+              INCUSBOX_INIT=0
+              INCUSBOX_NVIDIA=0
+          - path: /usr/local/bin/incusbox-init
+            permissions: '0755'
+            encoding: b64
+            content: ${init_b64}
+          runcmd:
+          - [sh, /usr/local/bin/incusbox-init]
+          EOF
+
+          sudo incus launch local:ci-debian ci-debian \
+            --profile incusbox-base \
+            --storage default \
+            --config user.manager=incusbox \
+            --config "raw.idmap=uid ${uid} ${uid}
+          gid ${gid} ${gid}" \
+            --config "raw.lxc=lxc.apparmor.profile = unconfined
+          lxc.cap.drop =
+          lxc.cgroup.devices.allow = a" \
+            --config "cloud-init.user-data=$(cat /tmp/cloud-init.yaml)"
+          sudo incus config device add ci-debian eth0 nic \
+            nictype=bridged parent=incusbr0 name=eth0
+          sudo incus config device add ci-debian home disk \
+            source="${home}" path="${home}"
+          echo "Container launched"
+
+      - name: Wait for cloud-init and incusbox-init to complete
+        run: |
+          echo "Waiting for /run/incusbox-ready..."
+          for i in $(seq 1 60); do
+            if sudo incus exec ci-debian -- test -f /run/incusbox-ready 2>/dev/null; then
+              echo "Ready after ${i}s"
+              break
+            fi
+            [ "${i}" -eq 60 ] && { echo "FAIL: timed out waiting for incusbox-ready"; exit 1; }
+            sleep 5
+          done
+
+      - name: Verify user exists inside container
+        run: |
+          user="$(id -run)"
+          result="$(sudo incus exec ci-debian -- id "${user}" 2>/dev/null || true)"
+          echo "id output: ${result}"
+          [ -n "${result}" ] || { echo "FAIL: user ${user} not found"; exit 1; }
+          echo "OK: user exists"
+
+      - name: Verify home directory is bind-mounted
+        run: |
+          result="$(sudo incus exec ci-debian -- test -d "${HOME}" 2>/dev/null && echo "exists" || echo "missing")"
+          echo "Home ${HOME}: ${result}"
+          [ "${result}" = "exists" ] || { echo "FAIL: home not mounted"; exit 1; }
+
+      - name: Verify sudo works inside container
+        run: |
+          user="$(id -run)"
+          sudo incus exec ci-debian -- su - "${user}" -s /bin/sh -c "sudo id" \
+            && echo "OK: sudo works" || { echo "FAIL: sudo failed"; exit 1; }
+
+      - name: incusbox stop and rm
+        run: |
+          sudo incusbox stop --root ci-debian
+          sudo incusbox rm --root --yes ci-debian
+          sudo incus info ci-debian >/dev/null 2>&1 && \
+            { echo "FAIL: container still exists"; exit 1; } || echo "OK: removed"
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== incus list ==="
+          sudo incus list || true
+          echo "=== cloud-init status ==="
+          sudo incus exec ci-debian -- cloud-init status --long 2>/dev/null || true
+          echo "=== incusbox-init log ==="
+          sudo incus exec ci-debian -- cat /var/log/incusbox-init.log 2>/dev/null || true
+          echo "=== /run/incusbox-ready ==="
+          sudo incus exec ci-debian -- ls -la /run/incusbox-ready 2>/dev/null || echo "not present"
