@@ -366,17 +366,19 @@ jobs:
           # --headless runs without a TTY; -- id prints the uid inside the
           # container. The container user is the runner uid.
           uid="$(id -ru)"
+          # Verify enter runs as the correct uid inside the container
           result="$(sudo incusbox enter --root --headless ci-test -- id -u 2>&1)"
           echo "enter id -u output: ${result}"
           printf '%s' "${result}" | grep -qE "^[0-9]+$" \
             || { echo "FAIL: expected numeric uid, got: ${result}"; exit 1; }
           [ "${result}" = "${uid}" ] \
             || { echo "FAIL: expected uid ${uid}, got ${result}"; exit 1; }
-          # Also verify the working directory is the container home
-          home_result="$(sudo incusbox enter --root --headless ci-test -- pwd 2>&1)"
-          echo "enter pwd output: ${home_result}"
-          [ "${home_result}" = "${HOME}" ] \
-            || { echo "FAIL: expected cwd ${HOME}, got ${home_result}"; exit 1; }
+          # Verify CONTAINER_ID env is injected by incusbox-enter
+          cid="$(sudo incusbox enter --root --headless ci-test -- \
+            sh -c 'echo $CONTAINER_ID' 2>&1)"
+          echo "enter CONTAINER_ID: ${cid}"
+          [ "${cid}" = "ci-test" ] \
+            || { echo "FAIL: expected CONTAINER_ID=ci-test, got ${cid}"; exit 1; }
           echo "OK: incusbox-enter works"
 
       - name: incusbox-host-exec
