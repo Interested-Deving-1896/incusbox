@@ -295,14 +295,17 @@ WRITEBLOCK
 
 # ── XDG dirs ──────────────────────────────────────────────────────────────────
 setup_xdg_dirs() {
-    local xdg_data="${INCUSBOX_CONTAINER_HOME}/.local/share"
-    local xdg_config="${INCUSBOX_CONTAINER_HOME}/.config"
-    local xdg_cache="${INCUSBOX_CONTAINER_HOME}/.cache"
+    # Run as the target user so bind-mounted home dirs (owned by host uid)
+    # are writable. Fall back silently if su fails.
+    local xdg_cmd
+    xdg_cmd="mkdir -p \
+        '${INCUSBOX_CONTAINER_HOME}/.local/share' \
+        '${INCUSBOX_CONTAINER_HOME}/.config' \
+        '${INCUSBOX_CONTAINER_HOME}/.cache'"
 
-    for d in "${xdg_data}" "${xdg_config}" "${xdg_cache}"; do
-        mkdir -p "${d}"
-        chown "${INCUSBOX_HOST_UID}:${INCUSBOX_HOST_GID}" "${d}" 2>/dev/null || true
-    done
+    su -s /bin/sh -c "${xdg_cmd}" "${INCUSBOX_HOST_USER}" 2>/dev/null || \
+        sh -c "${xdg_cmd}" 2>/dev/null || \
+        log "Warning: could not create XDG dirs in ${INCUSBOX_CONTAINER_HOME}"
 }
 
 # ── main ──────────────────────────────────────────────────────────────────────
