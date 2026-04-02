@@ -140,10 +140,12 @@ jobs:
 
       - name: Test YAML parser against example file
         run: |
-          # Run the parser in isolation — no incus daemon needed
-          # Patch build_create_args to just echo args instead of running create
+          # Extract and run just the parse_yaml_containers function in isolation.
+          # Sourcing the full script would trigger show_help+exit due to missing
+          # --file argument. Instead we copy the function body directly.
           bash -c '
-            source incusbox/incusbox-assemble 2>/dev/null || true
+            # Inline the parser function from the script
+            eval "$(sed -n "/^parse_yaml_containers()/,/^}/p" incusbox/incusbox-assemble)"
             output="$(parse_yaml_containers incusbox/docs/example-assemble.yaml)"
             echo "${output}"
             count="$(echo "${output}" | grep "^CONTAINER_COUNT=" | cut -d= -f2)"
@@ -168,15 +170,16 @@ jobs:
       - name: Install Incus
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y incus incus-base
-          # Add runner user to incus-admin group
-          sudo adduser "$USER" incus-admin
-          sudo adduser "$USER" incus
+          # incus-base was renamed/merged into incus in recent Ubuntu packages
+          sudo apt-get install -y incus
+          # Add runner user to incus-admin group so sudo is not needed for incus
+          sudo adduser "$USER" incus-admin || true
+          sudo adduser "$USER" incus || true
 
       - name: Initialise Incus (minimal preseed)
         run: |
-          # Use a minimal dir-backed storage pool — no ZFS/Btrfs needed in CI
-          sudo incus admin init --preseed <<'PRESEED'
+          # Write preseed to a temp file to avoid heredoc YAML parsing issues
+          cat > /tmp/incus-preseed.yaml << 'EOF'
           config: {}
           networks:
           - name: incusbr0
@@ -200,7 +203,8 @@ jobs:
                 nictype: bridged
                 parent: incusbr0
                 type: nic
-          PRESEED
+          EOF
+          sudo incus admin init --preseed < /tmp/incus-preseed.yaml
 
       - name: Install incusbox
         run: |
