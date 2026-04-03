@@ -1,0 +1,90 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-start: start one or more incusbox containers
+# shellcheck disable=SC2034
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+rootful=0
+all=0
+verbose=0
+version="0.1.0"
+
+show_help() {
+    cat <<EOF
+incusbox version: ${version}
+
+Usage:
+  incusbox start [OPTIONS] [NAME...]
+
+Options:
+  -a, --all      Start all stopped incusbox containers
+  -r, --root     Use rootful incus
+  -v, --verbose  Show verbose output
+  -V, --version  Show version
+  -h, --help     Show this help
+
+Examples:
+  incusbox start mybox
+  incusbox start mybox devbox
+  incusbox start --all
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -a|--all)     all=1;                      shift ;;
+        -r|--root)    rootful=1;                  shift ;;
+        -v|--verbose) verbose=1;                  shift ;;
+        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)    show_help; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *)  break ;;
+    esac
+done
+
+resolve_incus
+require_incus
+
+start_container() {
+    local name="$1"
+    local status
+    status="$(${INCUS} info "${name}" 2>/dev/null | awk '/^Status:/ {print tolower($2)}')"
+    if [ "${status}" = "running" ]; then
+        log "'${name}' is already running"
+    else
+        info "Starting ${name}..."
+        if ${INCUS} start "${name}"; then
+            ok "Started '${name}'"
+        else
+            warn "Failed to start '${name}'"
+        fi
+    fi
+}
+
+if [ "${all}" -eq 1 ]; then
+    ${INCUS} list --format csv 2>/dev/null | while IFS=',' read -r name status _rest; do
+        manager="$(${INCUS} config get "${name}" user.manager 2>/dev/null || true)"
+        [ "${manager}" = "incusbox" ] || continue
+        [ "${status}" = "STOPPED" ] || continue
+        start_container "${name}"
+    done
+    exit 0
+fi
+
+[ "$#" -eq 0 ] && die "Container name required. Usage: incusbox start NAME [NAME...]"
+
+for container_name in "$@"; do
+    if ! ${INCUS} info "${container_name}" >/dev/null 2>&1; then
+        warn "Container '${container_name}' not found, skipping."
+        continue
+    fi
+    start_container "${container_name}"
+done

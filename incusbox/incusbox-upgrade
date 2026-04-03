@@ -14,6 +14,8 @@ _lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
 rootful=0
 all=0
 verbose=0
+check_only=0
+no_snapshot=0
 version="0.1.0"
 
 # (config loading and helpers provided by lib.sh)
@@ -26,21 +28,31 @@ Usage:
   incusbox upgrade [OPTIONS] [NAME...]
 
 Options:
-  -a, --all      Upgrade all incusbox containers
-  -r, --root     Use rootful incus
-  -v, --verbose  Show verbose output
-  -V, --version  Show version
-  -h, --help     Show this help
+  -a, --all          Upgrade all incusbox containers
+  -r, --root         Use rootful incus
+  -v, --verbose      Show verbose output
+      --check        Check for available updates without installing
+      --no-snapshot  Skip the pre-upgrade snapshot
+  -V, --version      Show version
+  -h, --help         Show this help
+
+Examples:
+  incusbox upgrade mybox
+  incusbox upgrade --all
+  incusbox upgrade --check mybox
+  incusbox upgrade --no-snapshot mybox
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        -a|--all)     all=1;                      shift ;;
-        -r|--root)    rootful=1;                  shift ;;
-        -v|--verbose) verbose=1;                  shift ;;
-        -V|--version) printf '%s\n' "${version}"; exit 0 ;;
-        -h|--help)    show_help; exit 0 ;;
+        -a|--all)        all=1;                      shift ;;
+        -r|--root)       rootful=1;                  shift ;;
+        -v|--verbose)    verbose=1;                  shift ;;
+        --check)         check_only=1;               shift ;;
+        --no-snapshot)   no_snapshot=1;              shift ;;
+        -V|--version)    printf '%s\n' "${version}"; exit 0 ;;
+        -h|--help)       show_help; exit 0 ;;
         --) shift; break ;;
         -*) die "Unknown option: $1" ;;
         *)  break ;;
@@ -70,6 +82,46 @@ upgrade_container() {
     # runtime package-manager detection for containers not created by incusbox.
     local distro_hint
     distro_hint="$(${INCUS} config get "${name}" user.incusbox.distro 2>/dev/null || true)"
+
+    # Pre-upgrade snapshot
+    if [ "${no_snapshot}" -eq 0 ] && [ "${check_only}" -eq 0 ]; then
+        local snap_name
+        snap_name="pre-upgrade-$(date +%Y%m%d-%H%M%S)"
+        log "Creating pre-upgrade snapshot: ${snap_name}"
+        if ${INCUS} snapshot create "${name}" "${snap_name}" 2>/dev/null; then
+            ok "Snapshot created: ${snap_name}"
+        else
+            warn "Snapshot failed — continuing without it"
+        fi
+    fi
+
+    if [ "${check_only}" -eq 1 ]; then
+        log "Checking for available updates in '${name}' (distro=${distro_hint:-auto})..."
+        ${INCUS} exec "${name}" -- sh -c "
+            distro='${distro_hint}'
+            case \"\${distro}\" in
+                ubuntu|debian|linuxmint|pop)
+                    apt-get update -qq && apt-get --simulate upgrade 2>/dev/null | grep '^Inst' || true ;;
+                fedora|rhel|centos|almalinux|rocky)
+                    dnf check-update 2>/dev/null || true ;;
+                arch|manjaro|endeavouros)
+                    pacman -Sy --noconfirm >/dev/null && pacman -Qu 2>/dev/null || true ;;
+                alpine)
+                    apk update -q && apk list --upgradable 2>/dev/null || true ;;
+                *)
+                    if command -v apt-get >/dev/null 2>&1; then
+                        apt-get update -qq && apt-get --simulate upgrade 2>/dev/null | grep '^Inst' || true
+                    elif command -v dnf >/dev/null 2>&1; then
+                        dnf check-update 2>/dev/null || true
+                    elif command -v pacman >/dev/null 2>&1; then
+                        pacman -Sy --noconfirm >/dev/null && pacman -Qu 2>/dev/null || true
+                    else
+                        printf 'Warning: unknown package manager in %s\n' '${name}' >&2
+                    fi ;;
+            esac
+        " && log "Check complete for '${name}'." || log "Warning: check of '${name}' exited non-zero"
+        return 0
+    fi
 
     log "Upgrading packages in '${name}' (distro=${distro_hint:-auto})..."
     ${INCUS} exec "${name}" -- sh -c "

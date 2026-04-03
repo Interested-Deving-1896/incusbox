@@ -32,23 +32,22 @@ Usage:
 
 Commands:
   create      Create a new incusbox container
+  start       Start one or more stopped containers
+  stop        Stop one or more running containers
   build       Build a custom Incus image from a base + provisioning script
   disk        Live disk resize (resize, info)
   enter       Enter an existing incusbox container
   list        List incusbox containers
   rm          Remove an incusbox container
-  stop        Stop one or more incusbox containers
   upgrade     Upgrade packages inside a container
   export      Export an app/binary/service from inside a container
   host-exec   Run a host command from inside a container
 
   snapshot        Create, list, restore, delete, and auto-schedule snapshots
   console         Attach to a container console (serial/VGA)
-  backup          Export a container to a portable archive
-  backup-list     List local backup archives
-  backup-delete   Delete a local backup archive
+  backup          Export/list/delete container backup archives
   restore         Import a container from a backup archive
-  publish         Publish a container as a reusable Incus image
+  publish         Create, list, and delete Incus images from containers
   import          Import an Incus image from a file
   fleet           Multi-container orchestration (start-all, stop-all, backup-all)
   monitor         Show container resource usage and stats
@@ -125,6 +124,7 @@ shift
 case "${cmd}" in
     # Core commands
     create)    run_subcommand create    "$@" ;;
+    start)     run_subcommand start     "$@" ;;
     build)     run_subcommand build     "$@" ;;
     disk)      run_subcommand disk      "$@" ;;
     enter)     run_subcommand enter     "$@" ;;
