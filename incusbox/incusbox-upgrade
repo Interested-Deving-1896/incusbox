@@ -89,7 +89,7 @@ upgrade_container() {
         snap_name="pre-upgrade-$(date +%Y%m%d-%H%M%S)"
         log "Creating pre-upgrade snapshot: ${snap_name}"
         if ${INCUS} snapshot create "${name}" "${snap_name}" 2>/dev/null; then
-            ok "Snapshot created: ${snap_name}"
+            log "Snapshot created: ${snap_name}"
         else
             warn "Snapshot failed — continuing without it"
         fi

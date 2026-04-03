@@ -70,12 +70,12 @@ _cmd_create() {
 
     log "Publishing '${name}' as image '${alias_name}' ..."
     ${INCUS} publish "${name}" --alias "${alias_name}"
-    ok "Published: ${alias_name}"
+    log "Published: ${alias_name}"
 
     if [ -n "${output}" ]; then
         log "Exporting image to file: ${output} ..."
         ${INCUS} image export "${alias_name}" "${output}"
-        ok "Image file: ${output}"
+        log "Image file: ${output}"
     fi
 
     [ "${was_running}" -eq 1 ] && { log "Restarting '${name}' ..."; ${INCUS} start "${name}"; }
@@ -97,7 +97,7 @@ _cmd_delete() {
     require_incus
     log "Deleting image '${alias_name}' ..."
     ${INCUS} image delete "${alias_name}"
-    ok "Deleted: ${alias_name}"
+    log "Deleted: ${alias_name}"
 }
 
 [ "$#" -eq 0 ] && { show_help; exit 0; }

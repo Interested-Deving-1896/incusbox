@@ -62,7 +62,7 @@ start_container() {
     else
         info "Starting ${name}..."
         if ${INCUS} start "${name}"; then
-            ok "Started '${name}'"
+            log "Started '${name}'"
         else
             warn "Failed to start '${name}'"
         fi
