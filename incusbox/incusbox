@@ -56,6 +56,7 @@ Commands:
   cloud-sync      Sync backups to cloud storage via rclone
 
   template        List and inspect container creation templates
+  talos           Manage Talos Linux VMs (fetch, import, launch, list)
   assemble        Create/update containers from a declarative YAML file
   setup-rootless  Guided setup for rootless incusbox via incus-user
   update          Check for and install incusbox updates
@@ -139,6 +140,7 @@ case "${cmd}" in
 
     # Declarative config
     template)       run_subcommand template       "$@" ;;
+    talos)          run_subcommand talos          "$@" ;;
     assemble)       run_subcommand assemble       "$@" ;;
     update)         run_subcommand update         "$@" ;;
     setup-rootless) run_subcommand setup-rootless "$@" ;;

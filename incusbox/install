@@ -107,6 +107,7 @@ incusbox-usb
 incusbox-gpu
 incusbox-cloud-sync
 incusbox-template
+incusbox-talos
 incusbox-assemble
 incusbox-update
 incusbox-setup-rootless

@@ -1,0 +1,351 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-talos: manage Talos Linux VMs in Incus via incusbox.
+#
+# Talos is a minimal, immutable Linux OS for Kubernetes.
+# Images are sourced from the windsorcli/talos-incus simplestreams server
+# (images.windsorcli.dev) or built locally from official Talos releases.
+#
+# References:
+#   https://www.talos.dev/
+#   https://github.com/windsorcli/talos-incus
+#   https://github.com/siderolabs/talos
+
+set -euo pipefail
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+
+TALOS_DEFAULT_VERSION="${INCUSBOX_TALOS_VERSION:-v1.9.5}"
+TALOS_DEFAULT_ARCH="${INCUSBOX_TALOS_ARCH:-amd64}"
+TALOS_REMOTE_NAME="${INCUSBOX_TALOS_REMOTE:-windsor}"
+TALOS_REMOTE_URL="${INCUSBOX_TALOS_REMOTE_URL:-https://images.windsorcli.dev}"
+TALOS_BUILD_DIR="${INCUSBOX_TALOS_BUILD_DIR:-${HOME}/.local/share/incusbox/talos-builds}"
+TALOS_GITHUB_BASE="https://github.com/siderolabs/talos/releases/download"
+
+show_help() {
+    cat <<EOF
+incusbox-talos — manage Talos Linux VMs in Incus
+
+Usage:
+  incusbox-talos remote   [add|remove|list]
+  incusbox-talos fetch    [VERSION] [--arch ARCH]
+  incusbox-talos import   [VERSION] [--arch ARCH]
+  incusbox-talos launch   NAME [--version VERSION] [--arch ARCH] [--cpus N] [--memory MiB]
+  incusbox-talos list
+  incusbox-talos versions
+
+Subcommands:
+  remote    Manage the windsor simplestreams remote (images.windsorcli.dev)
+  fetch     Download and convert a Talos release to Incus split-format images
+            (requires: curl, zstd, qemu-img)
+  import    Import a fetched Talos image into the Incus image store
+  launch    Launch a Talos VM (uses windsor remote by default; falls back to
+            local image if remote is not configured)
+  list      List Talos VMs managed by incusbox
+  versions  List Talos versions available on the windsor remote
+
+Defaults:
+  Version : ${TALOS_DEFAULT_VERSION}  (override: INCUSBOX_TALOS_VERSION)
+  Arch    : ${TALOS_DEFAULT_ARCH}     (override: INCUSBOX_TALOS_ARCH)
+  Remote  : ${TALOS_REMOTE_NAME}      (override: INCUSBOX_TALOS_REMOTE)
+
+Options:
+  -h, --help    Show this help
+
+Examples:
+  incusbox talos remote add
+  incusbox talos launch my-talos-node
+  incusbox talos launch my-talos-node --version v1.9.5 --cpus 2 --memory 2048
+  incusbox talos fetch v1.9.5
+  incusbox talos import v1.9.5
+  incusbox talos list
+EOF
+}
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+_require_cmd() {
+    local cmd="$1" pkg="${2:-$1}"
+    command -v "${cmd}" >/dev/null 2>&1 || die "${cmd} is required. Install: apt install ${pkg}"
+}
+
+_remote_exists() {
+    ${INCUS} remote list --format csv 2>/dev/null | grep -q "^${TALOS_REMOTE_NAME},"
+}
+
+_local_image_exists() {
+    local version="$1" arch="$2"
+    ${INCUS} image list --format csv 2>/dev/null \
+    | grep -q "talos-${version}-${arch}" 2>/dev/null
+}
+
+# ── remote ────────────────────────────────────────────────────────────────────
+
+cmd_remote() {
+    local subcmd="${1:-list}"; shift || true
+
+    case "${subcmd}" in
+        add)
+            require_incus
+            if _remote_exists; then
+                log "Remote '${TALOS_REMOTE_NAME}' already configured"
+                return 0
+            fi
+            log "Adding simplestreams remote: ${TALOS_REMOTE_NAME} → ${TALOS_REMOTE_URL}"
+            ${INCUS} remote add "${TALOS_REMOTE_NAME}" "${TALOS_REMOTE_URL}" \
+                --protocol simplestreams --public
+            log "Remote '${TALOS_REMOTE_NAME}' added"
+            log "List images: incusbox talos versions"
+            ;;
+        remove|rm)
+            require_incus
+            ${INCUS} remote remove "${TALOS_REMOTE_NAME}" 2>/dev/null || true
+            log "Remote '${TALOS_REMOTE_NAME}' removed"
+            ;;
+        list|ls)
+            require_incus
+            log "Configured Incus remotes:"
+            ${INCUS} remote list
+            ;;
+        *)
+            die "Unknown remote subcommand: ${subcmd} (add|remove|list)" ;;
+    esac
+}
+
+# ── versions ──────────────────────────────────────────────────────────────────
+
+cmd_versions() {
+    require_incus
+    if ! _remote_exists; then
+        warn "Remote '${TALOS_REMOTE_NAME}' not configured."
+        log "Add it with: incusbox talos remote add"
+        return 1
+    fi
+    log "Talos images available on '${TALOS_REMOTE_NAME}':"
+    echo ""
+    ${INCUS} image list "${TALOS_REMOTE_NAME}:" --format table 2>/dev/null \
+    | grep -i talos || log "  No Talos images found (remote may still be syncing)"
+}
+
+# ── fetch ─────────────────────────────────────────────────────────────────────
+
+cmd_fetch() {
+    local version="${1:-${TALOS_DEFAULT_VERSION}}"
+    local arch="${TALOS_DEFAULT_ARCH}"
+    shift || true
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --arch) arch="$2"; shift 2 ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    _require_cmd curl
+    _require_cmd zstd zstd
+    _require_cmd qemu-img qemu-utils
+
+    local work_dir="${TALOS_BUILD_DIR}/${version}-${arch}"
+    local raw_zst="${work_dir}/metal-${arch}.raw.zst"
+    local raw_file="${work_dir}/metal-${arch}.raw"
+    local qcow2_file="${work_dir}/talos-${arch}.qcow2"
+    local meta_yaml="${work_dir}/metadata.yaml"
+    local meta_tar="${work_dir}/talos-${arch}-incus.tar.xz"
+    local dl_url="${TALOS_GITHUB_BASE}/${version}/metal-${arch}.raw.zst"
+
+    mkdir -p "${work_dir}"
+
+    log "Fetching Talos ${version} (${arch})"
+    log "  Build dir : ${work_dir}"
+
+    # Step 1: Download
+    if [ -f "${raw_zst}" ]; then
+        log "  Raw image already downloaded — skipping"
+    else
+        log "  Downloading: ${dl_url}"
+        curl --disable --location --fail --progress-bar \
+            --output "${raw_zst}" "${dl_url}" \
+            || die "Download failed: ${dl_url}"
+        log "  Downloaded: $(du -sh "${raw_zst}" | awk '{print $1}')"
+    fi
+
+    # Step 2: Decompress
+    if [ -f "${raw_file}" ]; then
+        log "  Raw image already decompressed — skipping"
+    else
+        log "  Decompressing..."
+        zstd -d "${raw_zst}" -o "${raw_file}" --force
+    fi
+
+    # Step 3: Convert to qcow2
+    if [ -f "${qcow2_file}" ]; then
+        log "  qcow2 already exists — skipping conversion"
+    else
+        log "  Converting to qcow2..."
+        qemu-img convert -f raw -O qcow2 "${raw_file}" "${qcow2_file}"
+        log "  qcow2: $(du -sh "${qcow2_file}" | awk '{print $1}')"
+    fi
+
+    # Step 4: Create metadata
+    log "  Creating metadata..."
+    cat > "${meta_yaml}" <<EOF
+architecture: "${arch}"
+creation_date: $(date +%s)
+properties:
+  architecture: "${arch}"
+  description: "Talos Linux ${version} (${arch})"
+  name: "talos-${version}-${arch}"
+  os: "talos"
+  release: "${version}"
+  variant: "default"
+templates: {}
+EOF
+
+    # Step 5: Create metadata tarball
+    ( cd "${work_dir}" && tar -cJf "${meta_tar}" metadata.yaml )
+
+    log ""
+    log "Build complete:"
+    log "  Metadata : ${meta_tar}"
+    log "  Disk     : ${qcow2_file}"
+    log ""
+    log "Import with: incusbox talos import ${version} --arch ${arch}"
+}
+
+# ── import ────────────────────────────────────────────────────────────────────
+
+cmd_import() {
+    local version="${1:-${TALOS_DEFAULT_VERSION}}"
+    local arch="${TALOS_DEFAULT_ARCH}"
+    shift || true
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --arch) arch="$2"; shift 2 ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    require_incus
+
+    local work_dir="${TALOS_BUILD_DIR}/${version}-${arch}"
+    local meta_tar="${work_dir}/talos-${arch}-incus.tar.xz"
+    local qcow2_file="${work_dir}/talos-${arch}.qcow2"
+
+    [ -f "${meta_tar}" ]   || die "Metadata not found: ${meta_tar}. Run: incusbox talos fetch ${version}"
+    [ -f "${qcow2_file}" ] || die "Disk image not found: ${qcow2_file}. Run: incusbox talos fetch ${version}"
+
+    local alias="talos-${version}-${arch}"
+
+    if _local_image_exists "${version}" "${arch}"; then
+        log "Image '${alias}' already in Incus image store"
+        return 0
+    fi
+
+    log "Importing Talos ${version} (${arch}) into Incus..."
+    ${INCUS} image import "${meta_tar}" "${qcow2_file}" \
+        --alias "${alias}" \
+        --type virtual-machine
+    log "Image imported: ${alias}"
+    log "Launch with: incusbox talos launch my-node --version ${version}"
+}
+
+# ── launch ────────────────────────────────────────────────────────────────────
+
+cmd_launch() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    shift
+
+    local version="${TALOS_DEFAULT_VERSION}"
+    local arch="${TALOS_DEFAULT_ARCH}"
+    local cpus="2"
+    local memory="2048MiB"
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --version) version="$2"; shift 2 ;;
+            --arch)    arch="$2";    shift 2 ;;
+            --cpus)    cpus="$2";    shift 2 ;;
+            --memory)  memory="$2";  shift 2 ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    require_incus
+
+    local image_ref=""
+
+    # Prefer windsor remote if configured
+    if _remote_exists; then
+        image_ref="${TALOS_REMOTE_NAME}:talos/${version}/${arch}"
+        log "Using remote image: ${image_ref}"
+    elif _local_image_exists "${version}" "${arch}"; then
+        image_ref="talos-${version}-${arch}"
+        log "Using local image: ${image_ref}"
+    else
+        log "Remote '${TALOS_REMOTE_NAME}' not configured and no local image found."
+        log "Options:"
+        log "  1. Add remote:  incusbox talos remote add"
+        log "  2. Build local: incusbox talos fetch ${version} && incusbox talos import ${version}"
+        die "No Talos image available"
+    fi
+
+    log "Launching Talos VM: ${name}"
+    log "  Image  : ${image_ref}"
+    log "  CPUs   : ${cpus}"
+    log "  Memory : ${memory}"
+
+    ${INCUS} launch "${image_ref}" "${name}" \
+        --vm \
+        --config "limits.cpu=${cpus}" \
+        --config "limits.memory=${memory}" \
+        --config "security.secureboot=false"
+
+    log ""
+    log "VM '${name}' launched"
+    log ""
+    log "Next steps:"
+    log "  incusbox console ${name}     — attach to console"
+    log "  incusbox monitor status ${name} — check status"
+    log ""
+    log "Configure Talos via talosctl:"
+    log "  talosctl --nodes \$(incus list ${name} --format csv -c 4 | head -1) ..."
+}
+
+# ── list ──────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    require_incus
+    log "Talos VMs:"
+    echo ""
+    ${INCUS} list --format table 2>/dev/null \
+    | grep -i "talos" || log "  No Talos VMs found"
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    remote)          cmd_remote   "$@" ;;
+    fetch|build)     cmd_fetch    "$@" ;;
+    import)          cmd_import   "$@" ;;
+    launch|create)   cmd_launch   "$@" ;;
+    list|ls)         cmd_list ;;
+    versions|images) cmd_versions ;;
+    -h|--help|help)  show_help ;;
+    *)
+        printf >&2 "incusbox-talos: unknown subcommand '%s'\n" "${subcmd}"
+        printf >&2 "Run 'incusbox-talos --help' for usage.\n"
+        exit 1 ;;
+esac
