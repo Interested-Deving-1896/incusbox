@@ -55,6 +55,7 @@ Commands:
   gpu             Manage GPU passthrough
   cloud-sync      Sync backups to cloud storage via rclone
 
+  profiles        Manage Incus profiles (list, install, diff, apply)
   template        List and inspect container creation templates
   talos           Manage Talos Linux VMs (fetch, import, launch, list)
   status          Show status of one or all containers/VMs
@@ -143,6 +144,7 @@ case "${cmd}" in
     cloud-sync)     run_subcommand cloud-sync     "$@" ;;
 
     # Declarative config
+    profiles)       run_subcommand profiles       "$@" ;;
     template)       run_subcommand template       "$@" ;;
     talos)          run_subcommand talos          "$@" ;;
     status)         run_subcommand status         "$@" ;;

@@ -1,0 +1,240 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-profiles — manage Incus profiles for incusbox containers
+#
+# Usage:
+#   incusbox profiles list              List available profile files
+#   incusbox profiles show <name>       Print a profile's YAML
+#   incusbox profiles install [--all]   Install profiles into Incus
+#   incusbox profiles diff              Compare local files with Incus
+#   incusbox profiles apply <ct> <name> Apply a profile to a container
+#   incusbox profiles remove <ct> <name> Remove a profile from a container
+
+set -euo pipefail
+
+_self="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "${_self}")"
+_lib="${_dir}/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+# Profile search path: script dir first, then standard locations
+_profile_dirs=(
+    "${_dir}/profiles"
+    "${HOME}/.local/share/incusbox/profiles"
+    "/usr/local/share/incusbox/profiles"
+    "/usr/share/incusbox/profiles"
+)
+
+_find_profile_dir() {
+    for d in "${_profile_dirs[@]}"; do
+        [ -d "$d" ] && echo "$d" && return 0
+    done
+    die "No profile directory found. Expected one of: ${_profile_dirs[*]}"
+}
+
+_find_profile_file() {
+    local name="$1"
+    for d in "${_profile_dirs[@]}"; do
+        local f="${d}/${name}.yaml"
+        [ -f "$f" ] && echo "$f" && return 0
+        # Also accept bare filename
+        f="${d}/${name}"
+        [ -f "$f" ] && echo "$f" && return 0
+    done
+    return 1
+}
+
+_require_incus() {
+    command -v incus &>/dev/null || die "incus not found. Install Incus first."
+}
+
+# ── list ──────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local profile_dir
+    profile_dir=$(_find_profile_dir)
+
+    log "Available profiles (${profile_dir}):"
+    echo ""
+    for f in "${profile_dir}"/*.yaml; do
+        [ -f "$f" ] || continue
+        local name
+        name=$(basename "$f" .yaml)
+        local desc=""
+        desc=$(grep -m1 '^description:' "$f" 2>/dev/null | sed 's/^description:[[:space:]]*//' | tr -d '"' || true)
+        if [ -n "$desc" ]; then
+            printf "  %-30s  %s\n" "$name" "$desc"
+        else
+            printf "  %s\n" "$name"
+        fi
+    done
+    echo ""
+    log "Install with: incusbox profiles install"
+}
+
+# ── show ──────────────────────────────────────────────────────────────────────
+
+cmd_show() {
+    local name="${1:?Usage: incusbox profiles show <name>}"
+    local file
+    if ! file=$(_find_profile_file "$name"); then
+        die "Profile not found: $name"
+    fi
+    cat "$file"
+}
+
+# ── install ───────────────────────────────────────────────────────────────────
+
+cmd_install() {
+    local all=0
+    local names=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --all) all=1; shift ;;
+            --help|-h) _usage; exit 0 ;;
+            -*) die "Unknown option: $1" ;;
+            *) names+=("$1"); shift ;;
+        esac
+    done
+
+    _require_incus
+
+    local profile_dir
+    profile_dir=$(_find_profile_dir)
+
+    if [ "$all" -eq 1 ] || [ "${#names[@]}" -eq 0 ]; then
+        # Install all profiles in the directory
+        for f in "${profile_dir}"/*.yaml; do
+            [ -f "$f" ] || continue
+            local pname
+            pname=$(basename "$f" .yaml)
+            _install_one "$pname" "$f"
+        done
+    else
+        for name in "${names[@]}"; do
+            local file
+            if ! file=$(_find_profile_file "$name"); then
+                die "Profile not found: $name"
+            fi
+            _install_one "$name" "$file"
+        done
+    fi
+}
+
+_install_one() {
+    local name="$1" file="$2"
+    if incus profile show "$name" &>/dev/null 2>&1; then
+        incus profile edit "$name" < "$file"
+        log "  updated : $name"
+    else
+        incus profile create "$name"
+        incus profile edit "$name" < "$file"
+        log "  created : $name"
+    fi
+}
+
+# ── diff ──────────────────────────────────────────────────────────────────────
+
+cmd_diff() {
+    _require_incus
+
+    local profile_dir
+    profile_dir=$(_find_profile_dir)
+    local found_any=0
+
+    for f in "${profile_dir}"/*.yaml; do
+        [ -f "$f" ] || continue
+        local pname
+        pname=$(basename "$f" .yaml)
+        found_any=1
+        if incus profile show "$pname" &>/dev/null 2>&1; then
+            local diff_out
+            diff_out=$(diff <(incus profile show "$pname") "$f" || true)
+            if [ -n "$diff_out" ]; then
+                log "--- $pname (incus vs local) ---"
+                echo "$diff_out"
+            else
+                log "  $pname: in sync"
+            fi
+        else
+            log "  $pname: not installed in Incus (run: incusbox profiles install $pname)"
+        fi
+    done
+
+    [ "$found_any" -eq 0 ] && log "No profile files found in ${profile_dir}"
+}
+
+# ── apply ─────────────────────────────────────────────────────────────────────
+
+cmd_apply() {
+    local ct="${1:?Usage: incusbox profiles apply <container> <profile>}"
+    local profile="${2:?Usage: incusbox profiles apply <container> <profile>}"
+    _require_incus
+
+    incus profile show "$profile" &>/dev/null 2>&1 \
+        || die "Profile '$profile' not installed in Incus. Run: incusbox profiles install $profile"
+
+    incus profile add "$ct" "$profile"
+    log "Applied profile '$profile' to container '$ct'"
+}
+
+# ── remove ────────────────────────────────────────────────────────────────────
+
+cmd_remove() {
+    local ct="${1:?Usage: incusbox profiles remove <container> <profile>}"
+    local profile="${2:?Usage: incusbox profiles remove <container> <profile>}"
+    _require_incus
+
+    incus profile remove "$ct" "$profile"
+    log "Removed profile '$profile' from container '$ct'"
+}
+
+# ── help ──────────────────────────────────────────────────────────────────────
+
+_usage() {
+    cat <<EOF
+incusbox profiles — manage Incus profiles for incusbox containers
+
+Usage:
+  incusbox profiles list                    List available profile files
+  incusbox profiles show <name>             Print a profile's YAML
+  incusbox profiles install [--all] [name]  Install profile(s) into Incus
+  incusbox profiles diff                    Compare local files with Incus
+  incusbox profiles apply <ct> <name>       Apply a profile to a container
+  incusbox profiles remove <ct> <name>      Remove a profile from a container
+
+Available profiles:
+  incusbox-base         Base container settings (HOME share, X11, audio)
+  incusbox-gui          GUI/desktop integration (Wayland, X11, DRI)
+  incusbox-rootless     Rootless container via incus-user daemon
+  incusbox-nvidia       NVIDIA GPU passthrough
+  incusbox-unshare-net  Isolated network namespace
+  incusbox-init         Systemd-init container variant
+
+Examples:
+  incusbox profiles install --all
+  incusbox profiles install incusbox-gui
+  incusbox profiles show incusbox-rootless
+  incusbox profiles apply mybox incusbox-gui
+  incusbox profiles diff
+EOF
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+subcmd="${1:-help}"
+shift || true
+
+case "$subcmd" in
+    list)    cmd_list    "$@" ;;
+    show)    cmd_show    "$@" ;;
+    install) cmd_install "$@" ;;
+    diff)    cmd_diff    "$@" ;;
+    apply)   cmd_apply   "$@" ;;
+    remove)  cmd_remove  "$@" ;;
+    help|--help|-h) _usage ;;
+    *) printf >&2 "Unknown subcommand: %s\nRun: incusbox profiles help\n" "$subcmd"; exit 1 ;;
+esac
