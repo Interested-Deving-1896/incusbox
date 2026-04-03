@@ -1,0 +1,125 @@
+.TH INCUSBOX-TALOS 1 "2026" "incusbox 0.1.0" "User Commands"
+.SH NAME
+incusbox-talos \- manage Talos Linux VMs in Incus
+.SH SYNOPSIS
+.B incusbox talos
+.IR SUBCOMMAND " [" OPTIONS "] [" ARGS ]
+.SH DESCRIPTION
+Provides lifecycle management for Talos Linux virtual machines running under Incus.
+Talos is a minimal, immutable Linux distribution designed for Kubernetes nodes.
+.PP
+Images can be sourced from the
+.B windsor
+simplestreams remote
+.RI ( images.windsorcli.dev )
+or built locally from official Talos GitHub releases.
+.SH SUBCOMMANDS
+.TP
+.B remote add
+Add the windsor simplestreams remote to Incus.
+.TP
+.B remote remove
+Remove the windsor remote.
+.TP
+.B remote list
+List all configured Incus remotes.
+.TP
+.BI fetch " [VERSION]"
+Download the Talos metal disk image for
+.I VERSION
+from GitHub, decompress it, convert to qcow2, and create the Incus metadata bundle.
+Requires
+.BR curl ,
+.BR zstd ,
+and
+.BR qemu-img .
+.TP
+.BI import " [VERSION]"
+Import a previously fetched Talos image into the Incus image store.
+.TP
+.BI launch " NAME"
+Launch a Talos VM named
+.IR NAME .
+Uses the windsor remote if configured; falls back to a locally imported image.
+.TP
+.B list
+List running Talos VMs.
+.TP
+.B versions
+List Talos image versions available on the windsor remote.
+.SH OPTIONS
+.TP
+.BI \-\-version " VERSION"
+Talos release tag (e.g.\&
+.IR v1.9.5 ).
+Default:
+.BR v1.9.5 .
+.TP
+.BI \-\-arch " ARCH"
+CPU architecture:
+.B amd64
+or
+.BR arm64 .
+Default:
+.BR amd64 .
+.TP
+.BI \-\-cpus " N"
+Number of vCPUs for the launched VM. Default:
+.BR 2 .
+.TP
+.BI \-\-memory " MiB"
+Memory limit for the launched VM (e.g.\&
+.IR 2048MiB ).
+Default:
+.BR 2048MiB .
+.SH ENVIRONMENT
+.TP
+.B INCUSBOX_TALOS_VERSION
+Default Talos version. Overrides the compiled-in default.
+.TP
+.B INCUSBOX_TALOS_ARCH
+Default architecture.
+.TP
+.B INCUSBOX_TALOS_REMOTE
+Incus remote name for the simplestreams server. Default:
+.BR windsor .
+.TP
+.B INCUSBOX_TALOS_REMOTE_URL
+URL of the simplestreams server. Default:
+.IR https://images.windsorcli.dev .
+.TP
+.B INCUSBOX_TALOS_BUILD_DIR
+Directory for downloaded and converted images. Default:
+.IR ~/.local/share/incusbox/talos-builds .
+.SH EXAMPLES
+.PP
+Add the windsor remote and launch a Talos VM:
+.RS
+.nf
+incusbox talos remote add
+incusbox talos launch my-node
+.fi
+.RE
+.PP
+Build and import a specific version locally:
+.RS
+.nf
+incusbox talos fetch v1.9.5
+incusbox talos import v1.9.5
+incusbox talos launch my-node --version v1.9.5
+.fi
+.RE
+.PP
+Launch with custom resources:
+.RS
+.nf
+incusbox talos launch control-plane-1 --cpus 4 --memory 4096MiB
+.fi
+.RE
+.SH SEE ALSO
+.BR incusbox (1),
+.BR incusbox-create (1)
+.PP
+Talos documentation: https://www.talos.dev/
+.br
+talos-incus project: https://github.com/windsorcli/talos-incus
