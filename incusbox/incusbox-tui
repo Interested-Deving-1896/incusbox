@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-tui — interactive terminal UI for incusbox
+#
+# Menu-driven interface for common incusbox operations.
+# Requires: dialog (or whiptail as fallback)
+#
+# Usage:
+#   incusbox tui
+#   incusbox-tui
+
+set -euo pipefail
+
+_self="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "${_self}")"
+_lib="${_dir}/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+INCUSBOX="${_dir}/incusbox"
+[ -x "${INCUSBOX}" ] || INCUSBOX="$(command -v incusbox 2>/dev/null || true)"
+[ -x "${INCUSBOX}" ] || die "incusbox not found"
+
+# ── dialog backend ────────────────────────────────────────────────────────────
+
+DIALOG=""
+
+_detect_dialog() {
+    if command -v dialog &>/dev/null; then
+        DIALOG="dialog"
+    elif command -v whiptail &>/dev/null; then
+        DIALOG="whiptail"
+    else
+        die "Neither dialog nor whiptail found. Install: sudo apt install dialog"
+    fi
+}
+
+_dlg() {
+    "$DIALOG" --backtitle "incusbox" "$@" 3>&1 1>&2 2>&3
+}
+
+_dlg_menu() {
+    local title="$1" text="$2"; shift 2
+    _dlg --title "$title" --menu "$text" 0 0 0 "$@"
+}
+
+_dlg_input() {
+    local title="$1" text="$2" default="${3:-}"
+    _dlg --title "$title" --inputbox "$text" 0 60 "$default"
+}
+
+_dlg_yesno() {
+    local title="$1" text="$2"
+    "$DIALOG" --backtitle "incusbox" --title "$title" --yesno "$text" 0 0
+}
+
+_dlg_msgbox() {
+    local title="$1" text="$2"
+    "$DIALOG" --backtitle "incusbox" --title "$title" --msgbox "$text" 0 0
+}
+
+_run_cmd() {
+    local title="$1"; shift
+    local output
+    output=$("$@" 2>&1) || true
+    output=$(printf '%s' "$output" | sed 's/\x1b\[[0-9;]*m//g')
+    _dlg_msgbox "$title" "${output:-Done.}"
+}
+
+_pick_container() {
+    local containers
+    containers=$(incus list --format csv -c n 2>/dev/null | head -20 || true)
+    if [ -z "$containers" ]; then
+        _dlg_input "Container" "Container name:" ""
+        return
+    fi
+    local items=()
+    while IFS= read -r ct; do
+        items+=("$ct" "")
+    done <<< "$containers"
+    _dlg_menu "Select Container" "Choose a container:" "${items[@]}"
+}
+
+# ── menus ─────────────────────────────────────────────────────────────────────
+
+menu_main() {
+    while true; do
+        local choice
+        choice=$(_dlg_menu "incusbox" "Select an action:" \
+            "containers" "Manage containers" \
+            "images"     "Build and manage images" \
+            "profiles"   "Manage Incus profiles" \
+            "backup"     "Backup and restore" \
+            "fleet"      "Multi-container orchestration" \
+            "doctor"     "Check prerequisites" \
+            "config"     "Configuration" \
+            "quit"       "Exit") || break
+
+        case "$choice" in
+            containers) menu_containers ;;
+            images)     menu_images ;;
+            profiles)   menu_profiles ;;
+            backup)     menu_backup ;;
+            fleet)      menu_fleet ;;
+            doctor)     _run_cmd "Doctor" "${INCUSBOX}" doctor ;;
+            config)     menu_config ;;
+            quit)       break ;;
+        esac
+    done
+}
+
+# ── containers ────────────────────────────────────────────────────────────────
+
+menu_containers() {
+    while true; do
+        local choice
+        choice=$(_dlg_menu "Containers" "Select an action:" \
+            "list"    "List containers" \
+            "create"  "Create a new container" \
+            "enter"   "Enter a container" \
+            "stop"    "Stop a container" \
+            "rm"      "Remove a container" \
+            "status"  "Show container status" \
+            "upgrade" "Upgrade packages in a container" \
+            "disk"    "Disk resize" \
+            "back"    "Back") || break
+
+        case "$choice" in
+            list)    _run_cmd "Containers" "${INCUSBOX}" list ;;
+            create)  menu_create ;;
+            enter)   menu_enter ;;
+            stop)    menu_stop ;;
+            rm)      menu_rm ;;
+            status)  menu_status ;;
+            upgrade) menu_upgrade ;;
+            disk)    menu_disk ;;
+            back)    break ;;
+        esac
+    done
+}
+
+menu_create() {
+    local name image
+    name=$(_dlg_input "Create Container" "Container name:" "mybox") || return
+    image=$(_dlg_input "Create Container" "Base image:" "images:ubuntu/24.04/cloud") || return
+    _run_cmd "Creating ${name}" "${INCUSBOX}" create --name "$name" --image "$image"
+}
+
+menu_enter() {
+    local ct
+    ct=$(_pick_container) || return
+    # Enter is interactive — run directly in terminal
+    clear
+    "${INCUSBOX}" enter "$ct" || true
+}
+
+menu_stop() {
+    local ct
+    ct=$(_pick_container) || return
+    if _dlg_yesno "Stop Container" "Stop container '${ct}'?"; then
+        _run_cmd "Stopping ${ct}" "${INCUSBOX}" stop "$ct"
+    fi
+}
+
+menu_rm() {
+    local ct
+    ct=$(_pick_container) || return
+    if _dlg_yesno "Remove Container" "Remove container '${ct}'? This cannot be undone."; then
+        _run_cmd "Removing ${ct}" "${INCUSBOX}" rm "$ct"
+    fi
+}
+
+menu_status() {
+    local ct
+    ct=$(_pick_container) || return
+    _run_cmd "Status: ${ct}" "${INCUSBOX}" status "$ct"
+}
+
+menu_upgrade() {
+    local ct
+    ct=$(_pick_container) || return
+    _run_cmd "Upgrading ${ct}" "${INCUSBOX}" upgrade "$ct"
+}
+
+menu_disk() {
+    local ct size
+    ct=$(_pick_container) || return
+    local choice
+    choice=$(_dlg_menu "Disk" "Select action:" \
+        "info"   "Show disk info" \
+        "resize" "Resize disk") || return
+    case "$choice" in
+        info)
+            _run_cmd "Disk Info: ${ct}" "${INCUSBOX}" disk info "$ct"
+            ;;
+        resize)
+            size=$(_dlg_input "Resize Disk" "New size (e.g. 20GB, +5GB):" "") || return
+            _run_cmd "Resizing ${ct}" "${INCUSBOX}" disk resize "$ct" "$size"
+            ;;
+    esac
+}
+
+# ── images ────────────────────────────────────────────────────────────────────
+
+menu_images() {
+    while true; do
+        local choice
+        choice=$(_dlg_menu "Images" "Select an action:" \
+            "build"   "Build a custom image" \
+            "publish" "Publish container as image" \
+            "import"  "Import an image from file" \
+            "back"    "Back") || break
+
+        case "$choice" in
+            build)   menu_build ;;
+            publish) menu_publish ;;
+            import)  menu_import ;;
+            back)    break ;;
+        esac
+    done
+}
+
+menu_build() {
+    local base alias_name script packages
+    base=$(_dlg_input "Build Image" "Base image:" "images:ubuntu/24.04/cloud") || return
+    alias_name=$(_dlg_input "Build Image" "Image alias (e.g. mybox/dev):" "") || return
+    packages=$(_dlg_input "Build Image" "Packages to install (space-separated, or blank):" "") || return
+    script=$(_dlg_input "Build Image" "Provisioning script path (or blank):" "") || return
+
+    local args=("${INCUSBOX}" build --base "$base" --name "$alias_name")
+    [ -n "$packages" ] && args+=(--packages "$packages")
+    [ -n "$script" ]   && args+=(--script "$script")
+    _run_cmd "Building ${alias_name}" "${args[@]}"
+}
+
+menu_publish() {
+    local ct alias_name
+    ct=$(_pick_container) || return
+    alias_name=$(_dlg_input "Publish" "Image alias:" "${ct}/published") || return
+    _run_cmd "Publishing ${ct}" "${INCUSBOX}" publish "$ct" --alias "$alias_name"
+}
+
+menu_import() {
+    local path alias_name
+    path=$(_dlg_input "Import Image" "Image file path:" "") || return
+    alias_name=$(_dlg_input "Import Image" "Alias (or blank):" "") || return
+    local args=("${INCUSBOX}" import --from "$path")
+    [ -n "$alias_name" ] && args+=(--alias "$alias_name")
+    _run_cmd "Importing" "${args[@]}"
+}
+
+# ── profiles ──────────────────────────────────────────────────────────────────
+
+menu_profiles() {
+    while true; do
+        local choice
+        choice=$(_dlg_menu "Profiles" "Select an action:" \
+            "list"    "List available profiles" \
+            "install" "Install all profiles into Incus" \
+            "diff"    "Compare local vs Incus profiles" \
+            "back"    "Back") || break
+
+        case "$choice" in
+            list)    _run_cmd "Profiles" "${INCUSBOX}" profiles list ;;
+            install) _run_cmd "Installing Profiles" "${INCUSBOX}" profiles install --all ;;
+            diff)    _run_cmd "Profile Diff" "${INCUSBOX}" profiles diff ;;
+            back)    break ;;
+        esac
+    done
+}
+
+# ── backup ────────────────────────────────────────────────────────────────────
+
+menu_backup() {
+    while true; do
+        local choice
+        choice=$(_dlg_menu "Backup" "Select an action:" \
+            "create"  "Create a backup" \
+            "list"    "List backups" \
+            "restore" "Restore from backup" \
+            "back"    "Back") || break
+
+        case "$choice" in
+            create)
+                local ct
+                ct=$(_pick_container) || continue
+                _run_cmd "Backing up ${ct}" "${INCUSBOX}" backup "$ct"
+                ;;
+            list)
+                _run_cmd "Backups" "${INCUSBOX}" backup-list
+                ;;
+            restore)
+                local archive
+                archive=$(_dlg_input "Restore" "Backup archive path:" "") || continue
+                _run_cmd "Restoring" "${INCUSBOX}" restore --from "$archive"
+                ;;
+            back) break ;;
+        esac
+    done
+}
+
+# ── fleet ─────────────────────────────────────────────────────────────────────
+
+menu_fleet() {
+    while true; do
+        local choice
+        choice=$(_dlg_menu "Fleet" "Select an action:" \
+            "status"     "Show all container status" \
+            "start-all"  "Start all stopped containers" \
+            "stop-all"   "Stop all running containers" \
+            "backup-all" "Backup all containers" \
+            "back"       "Back") || break
+
+        case "$choice" in
+            status)     _run_cmd "Fleet Status" "${INCUSBOX}" fleet status ;;
+            start-all)  _run_cmd "Starting All" "${INCUSBOX}" fleet start-all ;;
+            stop-all)   _run_cmd "Stopping All" "${INCUSBOX}" fleet stop-all ;;
+            backup-all) _run_cmd "Backing Up All" "${INCUSBOX}" fleet backup-all ;;
+            back)       break ;;
+        esac
+    done
+}
+
+# ── config ────────────────────────────────────────────────────────────────────
+
+menu_config() {
+    while true; do
+        local choice
+        choice=$(_dlg_menu "Configuration" "Select an action:" \
+            "show" "Show current config" \
+            "edit" "Edit config file" \
+            "init" "Create default config" \
+            "back" "Back") || break
+
+        case "$choice" in
+            show) _run_cmd "Config" "${INCUSBOX}" config show ;;
+            edit)
+                clear
+                "${INCUSBOX}" config edit || true
+                ;;
+            init) _run_cmd "Init Config" "${INCUSBOX}" config init ;;
+            back) break ;;
+        esac
+    done
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+_detect_dialog
+menu_main
+clear

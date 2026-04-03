@@ -67,6 +67,7 @@ Commands:
   assemble        Create/update containers from a declarative YAML file
   setup-rootless  Guided setup for rootless incusbox via incus-user
   update          Check for and install incusbox updates
+  tui             Launch interactive terminal UI (requires dialog or whiptail)
   doctor          Check prerequisites and runtime environment
 
   version     Show version
@@ -164,6 +165,7 @@ case "${cmd}" in
     host-exec) run_subcommand host-exec "$@" ;;
 
     # Meta
+    tui)            run_subcommand tui            "$@" ;;
     doctor)         run_subcommand doctor         "$@" ;;
     version|-V|--version) show_version ;;
     help|-h|--help)       show_help ;;
