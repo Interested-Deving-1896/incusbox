@@ -1,0 +1,83 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-publish: publish a container as a reusable Incus image.
+#
+# Uses 'incus publish' to create an image from a stopped container.
+# The image can be used to create new containers with 'incus init <alias>'.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incusbox-publish — publish a container as a reusable Incus image
+
+Usage:
+  incusbox-publish [OPTIONS] NAME
+
+Options:
+  --alias ALIAS     Image alias (default: incusbox-NAME)
+  --output PATH     Also export the image to a file at PATH
+  -h, --help        Show this help
+
+The container is stopped temporarily if running, then published.
+Create new containers from the image:
+  incus init <alias> <new-name>
+
+Examples:
+  incusbox-publish mybox
+  incusbox-publish mybox --alias mybox-golden
+  incusbox-publish mybox --output /backups/mybox-image.tar.gz
+EOF
+}
+
+name=""
+alias_name=""
+output=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --alias)   alias_name="$2"; shift 2 ;;
+        --output)  output="$2";     shift 2 ;;
+        -h|--help) show_help; exit 0 ;;
+        -*) die "Unknown option: $1" ;;
+        *) name="$1"; shift ;;
+    esac
+done
+
+[ -z "${name}" ] && { show_help; exit 1; }
+[ -z "${alias_name}" ] && alias_name="incusbox-${name}"
+
+require_incus
+
+${INCUS} info "${name}" >/dev/null 2>&1 || die "Container '${name}' not found"
+
+# Stop if running — Incus requires a stopped container to publish
+was_running=0
+if ${INCUS} info "${name}" 2>/dev/null | grep -q "^Status:.*Running"; then
+    was_running=1
+    log "Stopping '${name}' for publish ..."
+    ${INCUS} stop "${name}"
+fi
+
+log "Publishing '${name}' as image '${alias_name}' ..."
+${INCUS} publish "${name}" --alias "${alias_name}"
+ok "Published: ${alias_name}"
+
+if [ -n "${output}" ]; then
+    log "Exporting image to file: ${output} ..."
+    ${INCUS} image export "${alias_name}" "${output}"
+    ok "Image file: ${output}"
+fi
+
+[ "${was_running}" -eq 1 ] && { log "Restarting '${name}' ..."; ${INCUS} start "${name}"; }
+
+log "Create a new container from this image:"
+log "  incusbox create --image ${alias_name} --name <new-name>"

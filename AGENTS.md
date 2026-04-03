@@ -20,6 +20,10 @@ incusbox/
   incusbox-console      Attach to a container console
   incusbox-backup       Export a container to a portable archive
   incusbox-restore      Import a container from a backup archive
+  incusbox-publish      Publish a container as a reusable Incus image
+  incusbox-import       Import an Incus image from a file
+  incusbox-fleet        Multi-container orchestration (start-all, stop-all, backup-all, exec)
+  incusbox-monitor      Container resource usage and stats
   incusbox-export       Export an app/binary/service from inside a container
   incusbox-host-exec    Run a host command from inside a container
   incusbox-assemble     Create/update containers from a declarative YAML file
@@ -84,6 +88,10 @@ These commands delegate directly to Incus:
 | `incusbox console NAME` | `incus console` |
 | `incusbox backup NAME [--output PATH]` | `incus export` |
 | `incusbox restore NAME --from PATH` | `incus import` |
+| `incusbox publish NAME [--alias A] [--output PATH]` | `incus publish` + optional `incus image export` |
+| `incusbox import --from PATH [--alias A]` | `incus image import` |
+| `incusbox fleet list\|start-all\|stop-all\|backup-all\|exec` | multi-container orchestration |
+| `incusbox monitor [status\|stats\|top\|disk] NAME` | `incus info` + `incus config get` |
 
 ---
 

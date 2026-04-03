@@ -1,0 +1,64 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-import: import an Incus image from a file and register it locally.
+#
+# Complements incusbox-publish. After importing, use 'incusbox create'
+# with the image alias to create containers from the imported image.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incusbox-import — import an Incus image from a file
+
+Usage:
+  incusbox-import [OPTIONS] --from PATH
+
+Options:
+  -f, --from PATH   Image file to import (required)
+  --alias ALIAS     Alias to assign to the imported image
+  -h, --help        Show this help
+
+After importing, create containers with:
+  incusbox create --image <alias> --name <name>
+
+Examples:
+  incusbox-import --from /backups/mybox-image.tar.gz
+  incusbox-import --from /backups/mybox-image.tar.gz --alias mybox-golden
+EOF
+}
+
+archive=""
+alias_name=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -f|--from)  archive="$2";     shift 2 ;;
+        --alias)    alias_name="$2";  shift 2 ;;
+        -h|--help)  show_help; exit 0 ;;
+        -*) die "Unknown option: $1" ;;
+        *) shift ;;
+    esac
+done
+
+[ -z "${archive}" ] && die "--from PATH is required"
+[ -f "${archive}" ] || die "File not found: ${archive}"
+
+require_incus
+
+import_args=""
+[ -n "${alias_name}" ] && import_args="--alias ${alias_name}"
+
+log "Importing image from '${archive}' ..."
+# shellcheck disable=SC2086
+${INCUS} image import "${archive}" ${import_args}
+ok "Image imported${alias_name:+ as '${alias_name}'}"
+log "Create a container with: incusbox create --image ${alias_name:-<alias>} --name <name>"

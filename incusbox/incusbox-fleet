@@ -1,0 +1,164 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-fleet: multi-container orchestration.
+#
+# Operates on all incusbox-managed containers at once.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incusbox-fleet — multi-container orchestration
+
+Usage:
+  incusbox-fleet <subcommand> [options]
+
+Subcommands:
+  list          List all incusbox containers with status
+  start-all     Start all stopped containers
+  stop-all      Stop all running containers (--force for immediate)
+  backup-all    Backup all containers
+  status        Overview of all containers (alias for list)
+  exec CMD      Run a command on all running containers
+
+Options:
+  -h, --help    Show this help
+
+Examples:
+  incusbox fleet list
+  incusbox fleet start-all
+  incusbox fleet stop-all --force
+  incusbox fleet backup-all
+  incusbox fleet exec -- uname -a
+EOF
+}
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+_fleet_get_containers() {
+    local filter="${1:-all}"
+    local ct_list
+    ct_list=$(${INCUS} list --format csv -c n,s,t 2>/dev/null | grep ",container" || true)
+    [ -z "${ct_list}" ] && return
+    case "${filter}" in
+        running) printf '%s\n' "${ct_list}" | grep ",RUNNING,"  | cut -d',' -f1 ;;
+        stopped) printf '%s\n' "${ct_list}" | grep -v ",RUNNING," | cut -d',' -f1 ;;
+        all)     printf '%s\n' "${ct_list}" | cut -d',' -f1 ;;
+    esac
+}
+
+cmd_list() {
+    log "incusbox containers"
+    echo ""
+    printf "  %-24s %-10s %-20s\n" "NAME" "STATUS" "IMAGE"
+    printf "  %-24s %-10s %-20s\n" "----" "------" "-----"
+    local ct_list total=0 running=0
+    ct_list=$(${INCUS} list --format csv -c n,s,t,b 2>/dev/null | grep ",container" || true)
+    if [ -z "${ct_list}" ]; then
+        info "  No containers found"
+        return
+    fi
+    while IFS=',' read -r name status _type image; do
+        total=$((total+1))
+        if [ "${status}" = "RUNNING" ]; then
+            running=$((running+1))
+            printf "  %-24s \033[32m%-10s\033[0m %-20s\n" "${name}" "${status}" "${image}"
+        else
+            printf "  %-24s %-10s %-20s\n" "${name}" "${status}" "${image}"
+        fi
+    done <<< "${ct_list}"
+    echo ""
+    info "Total: ${running} running / ${total} containers"
+}
+
+cmd_start_all() {
+    local cts count=0
+    cts=$(_fleet_get_containers stopped)
+    [ -z "${cts}" ] && { info "No stopped containers"; return; }
+    while IFS= read -r ct; do
+        [ -n "${ct}" ] || continue
+        log "Starting: ${ct}"
+        ${INCUS} start "${ct}" && ok "  Started: ${ct}" || warn "  Failed: ${ct}"
+        count=$((count+1))
+    done <<< "${cts}"
+    ok "Started ${count} container(s)"
+}
+
+cmd_stop_all() {
+    local force=0
+    [ "${1:-}" = "--force" ] || [ "${1:-}" = "-f" ] && force=1
+    local cts count=0
+    cts=$(_fleet_get_containers running)
+    [ -z "${cts}" ] && { info "No running containers"; return; }
+    while IFS= read -r ct; do
+        [ -n "${ct}" ] || continue
+        log "Stopping: ${ct}"
+        if [ "${force}" -eq 1 ]; then
+            ${INCUS} stop "${ct}" --force && ok "  Stopped: ${ct}" || warn "  Failed: ${ct}"
+        else
+            ${INCUS} stop "${ct}" && ok "  Stopped: ${ct}" || warn "  Failed: ${ct}"
+        fi
+        count=$((count+1))
+    done <<< "${cts}"
+    ok "Stopped ${count} container(s)"
+}
+
+cmd_backup_all() {
+    local cts count=0 failed=0
+    cts=$(_fleet_get_containers all)
+    [ -z "${cts}" ] && { info "No containers to backup"; return; }
+    local backup_script
+    backup_script="$(cd "$(dirname "$0")" && pwd)/incusbox-backup"
+    [ -f "${backup_script}" ] || backup_script="incusbox-backup"
+    while IFS= read -r ct; do
+        [ -n "${ct}" ] || continue
+        log "Backing up: ${ct}"
+        if "${backup_script}" "${ct}"; then
+            count=$((count+1))
+        else
+            warn "  Failed: ${ct}"
+            failed=$((failed+1))
+        fi
+    done <<< "${cts}"
+    ok "Backed up ${count} container(s)"
+    [ "${failed}" -gt 0 ] && warn "${failed} backup(s) failed"
+}
+
+cmd_exec() {
+    [ "$#" -gt 0 ] || die "Usage: incusbox fleet exec -- <command>"
+    local cts
+    cts=$(_fleet_get_containers running)
+    [ -z "${cts}" ] && { info "No running containers"; return; }
+    while IFS= read -r ct; do
+        [ -n "${ct}" ] || continue
+        log "[${ct}]"
+        ${INCUS} exec "${ct}" -- "$@" 2>&1 | sed 's/^/  /' || warn "  Command failed on ${ct}"
+        echo ""
+    done <<< "${cts}"
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    list|ls|status) cmd_list ;;
+    start-all)      cmd_start_all ;;
+    stop-all)       cmd_stop_all "$@" ;;
+    backup-all)     cmd_backup_all ;;
+    exec)           cmd_exec "$@" ;;
+    -h|--help|help) show_help ;;
+    *)
+        printf >&2 "incusbox-fleet: unknown subcommand '%s'\n" "${subcmd}"
+        printf >&2 "Run 'incusbox fleet --help' for usage.\n"
+        exit 1 ;;
+esac
