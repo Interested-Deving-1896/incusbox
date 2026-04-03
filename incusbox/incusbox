@@ -48,6 +48,7 @@ Commands:
   import          Import an Incus image from a file
   fleet           Multi-container orchestration (start-all, stop-all, backup-all)
   monitor         Show container resource usage and stats
+  cloud-sync      Sync backups to cloud storage via rclone
 
   assemble        Create/update containers from a declarative YAML file
   setup-rootless  Guided setup for rootless incusbox via incus-user
@@ -122,6 +123,7 @@ case "${cmd}" in
     import)         run_subcommand import         "$@" ;;
     fleet)          run_subcommand fleet          "$@" ;;
     monitor)        run_subcommand monitor        "$@" ;;
+    cloud-sync)     run_subcommand cloud-sync     "$@" ;;
 
     # Declarative config
     assemble)       run_subcommand assemble       "$@" ;;

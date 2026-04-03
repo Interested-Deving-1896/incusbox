@@ -82,7 +82,7 @@ jobs:
                      incusbox-snapshot incusbox-snapshot-auto incusbox-console \
                      incusbox-backup incusbox-restore \
                      incusbox-publish incusbox-import \
-                     incusbox-fleet incusbox-monitor \
+                     incusbox-fleet incusbox-monitor incusbox-cloud-sync \
                      incusbox-assemble incusbox-setup-rootless; do
             if [ -x "${HOME}/.local/bin/${exe}" ]; then
               echo "OK:   ~/.local/bin/${exe}"

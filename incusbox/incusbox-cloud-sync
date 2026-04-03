@@ -1,0 +1,282 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-cloud-sync: sync container backups to cloud storage via rclone.
+
+set -euo pipefail
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+BACKUP_DIR="${INCUSBOX_BACKUP_DIR:-${HOME}/.local/share/incusbox/backups}"
+REMOTE_NAME="${INCUSBOX_CLOUD_REMOTE:-incusbox-backups}"
+REMOTE_PATH="${INCUSBOX_CLOUD_PATH:-incusbox/backups}"
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+require_rclone() {
+    if ! command -v rclone >/dev/null 2>&1; then
+        die "rclone is required for cloud sync. Install: https://rclone.org/install/"
+    fi
+}
+
+remote_configured() {
+    rclone listremotes 2>/dev/null | grep -q "^${REMOTE_NAME}:" 2>/dev/null
+}
+
+human_size() {
+    local bytes="$1"
+    if   [ "${bytes}" -ge 1073741824 ]; then printf '%dG' "$(( bytes / 1073741824 ))"
+    elif [ "${bytes}" -ge 1048576    ]; then printf '%dM' "$(( bytes / 1048576 ))"
+    elif [ "${bytes}" -ge 1024       ]; then printf '%dK' "$(( bytes / 1024 ))"
+    else printf '%dB' "${bytes}"
+    fi
+}
+
+# ── push ──────────────────────────────────────────────────────────────────────
+
+cmd_push() {
+    require_rclone
+    mkdir -p "${BACKUP_DIR}"
+
+    if ! remote_configured; then
+        die "Remote '${REMOTE_NAME}' not configured. Run: incusbox-cloud-sync config"
+    fi
+
+    local file_filter="${1:-}"
+
+    log "Cloud Sync: Push"
+    log "  Local  : ${BACKUP_DIR}"
+    log "  Remote : ${REMOTE_NAME}:${REMOTE_PATH}"
+
+    local count=0
+    for f in "${BACKUP_DIR}"/*.tar.gz "${BACKUP_DIR}"/*.tar; do
+        [ -f "${f}" ] || continue
+        local filename
+        filename="$(basename "${f}")"
+        if [ -n "${file_filter}" ] && ! printf '%s' "${filename}" | grep -q "${file_filter}"; then
+            continue
+        fi
+        local size
+        size="$(stat -c%s "${f}" 2>/dev/null || stat -f%z "${f}" 2>/dev/null || echo 0)"
+        log "  Uploading: ${filename} ($(human_size "${size}"))"
+        rclone copy "${f}" "${REMOTE_NAME}:${REMOTE_PATH}/" --progress --transfers 1 || {
+            warn "Failed to upload: ${filename}"
+            continue
+        }
+        count=$(( count + 1 ))
+    done
+
+    # Sync metadata files
+    for f in "${BACKUP_DIR}"/*.meta; do
+        [ -f "${f}" ] || continue
+        rclone copy "${f}" "${REMOTE_NAME}:${REMOTE_PATH}/" 2>/dev/null || true
+    done
+
+    if [ "${count}" -eq 0 ]; then
+        log "No backups to upload"
+    else
+        log "Uploaded ${count} backup(s)"
+    fi
+}
+
+# ── pull ──────────────────────────────────────────────────────────────────────
+
+cmd_pull() {
+    require_rclone
+    mkdir -p "${BACKUP_DIR}"
+
+    if ! remote_configured; then
+        die "Remote '${REMOTE_NAME}' not configured. Run: incusbox-cloud-sync config"
+    fi
+
+    local file_filter="${1:-}"
+
+    log "Cloud Sync: Pull"
+    log "  Remote : ${REMOTE_NAME}:${REMOTE_PATH}"
+    log "  Local  : ${BACKUP_DIR}"
+
+    if [ -n "${file_filter}" ]; then
+        rclone copy "${REMOTE_NAME}:${REMOTE_PATH}/" "${BACKUP_DIR}/" \
+            --include "*${file_filter}*" --progress --transfers 1 || die "Pull failed"
+    else
+        rclone copy "${REMOTE_NAME}:${REMOTE_PATH}/" "${BACKUP_DIR}/" \
+            --progress --transfers 1 || die "Pull failed"
+    fi
+
+    log "Pull complete"
+}
+
+# ── list ──────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    require_rclone
+
+    if ! remote_configured; then
+        die "Remote '${REMOTE_NAME}' not configured. Run: incusbox-cloud-sync config"
+    fi
+
+    log "Remote Backups: ${REMOTE_NAME}:${REMOTE_PATH}"
+    printf "  %-40s %-12s %s\n" "FILENAME" "SIZE" "MODIFIED"
+    printf "  %-40s %-12s %s\n" "--------" "----" "--------"
+
+    rclone lsf "${REMOTE_NAME}:${REMOTE_PATH}/" --format "psm" 2>/dev/null | \
+    while IFS=';' read -r path size mod; do
+        [ -n "${path}" ] || continue
+        case "${path}" in *.meta) continue ;; esac
+        printf "  %-40s %-12s %s\n" "${path}" "${size}" "${mod}"
+    done || log "  No remote backups found"
+
+    local local_count remote_count
+    local_count="$(find "${BACKUP_DIR}" -name '*.tar*' 2>/dev/null | wc -l)"
+    remote_count="$(rclone lsf "${REMOTE_NAME}:${REMOTE_PATH}/" --include '*.tar*' 2>/dev/null | wc -l || echo 0)"
+    log "Local: ${local_count} backups | Remote: ${remote_count} backups"
+}
+
+# ── config ────────────────────────────────────────────────────────────────────
+
+cmd_config() {
+    require_rclone
+    local subcmd="${1:-interactive}"
+
+    case "${subcmd}" in
+        show)
+            log "Cloud Sync Configuration"
+            printf "  Remote name : %s\n" "${REMOTE_NAME}"
+            printf "  Remote path : %s\n" "${REMOTE_PATH}"
+            printf "  Local dir   : %s\n" "${BACKUP_DIR}"
+            if remote_configured; then
+                log "Remote '${REMOTE_NAME}' is configured"
+            else
+                warn "Remote '${REMOTE_NAME}' is not configured"
+            fi
+            ;;
+        s3)
+            log "Configuring S3-compatible remote..."
+            rclone config create "${REMOTE_NAME}" s3 provider "AWS" env_auth "false" \
+                || die "S3 config failed"
+            log "S3 remote configured as '${REMOTE_NAME}'"
+            ;;
+        b2)
+            log "Configuring Backblaze B2 remote..."
+            rclone config create "${REMOTE_NAME}" b2 || die "B2 config failed"
+            log "B2 remote configured as '${REMOTE_NAME}'"
+            ;;
+        interactive|setup)
+            log "Launching rclone interactive config..."
+            printf "Create a remote named: %s\n" "${REMOTE_NAME}"
+            rclone config
+            ;;
+        *)
+            cat <<EOF
+incusbox-cloud-sync config - Configure cloud storage
+
+Subcommands:
+  show          Show current configuration
+  s3            Configure S3-compatible storage
+  b2            Configure Backblaze B2
+  interactive   Launch rclone interactive config (default)
+
+Environment variables:
+  INCUSBOX_CLOUD_REMOTE   rclone remote name (default: incusbox-backups)
+  INCUSBOX_CLOUD_PATH     Remote path (default: incusbox/backups)
+  INCUSBOX_BACKUP_DIR     Local backup directory
+
+Add to ~/.config/incusbox/incusbox.conf:
+  INCUSBOX_CLOUD_REMOTE=my-remote
+  INCUSBOX_CLOUD_PATH=my-bucket/incusbox
+EOF
+            ;;
+    esac
+}
+
+# ── status ────────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    require_rclone
+
+    log "Cloud Sync Status"
+
+    if ! remote_configured; then
+        warn "Remote '${REMOTE_NAME}' not configured"
+        log "Run: incusbox-cloud-sync config"
+        return 1
+    fi
+
+    log "Remote: ${REMOTE_NAME} (configured)"
+    log "Path  : ${REMOTE_PATH}"
+
+    local local_count local_size remote_count
+    local_count="$(find "${BACKUP_DIR}" -name '*.tar*' 2>/dev/null | wc -l)"
+    local_size="$(du -sh "${BACKUP_DIR}" 2>/dev/null | awk '{print $1}' || echo 0)"
+    remote_count="$(rclone lsf "${REMOTE_NAME}:${REMOTE_PATH}/" --include '*.tar*' 2>/dev/null | wc -l || echo '?')"
+
+    printf "  Local backups  : %s (%s)\n" "${local_count}" "${local_size}"
+    printf "  Remote backups : %s\n" "${remote_count}"
+
+    local unsynced=0
+    for f in "${BACKUP_DIR}"/*.tar.gz "${BACKUP_DIR}"/*.tar; do
+        [ -f "${f}" ] || continue
+        local fname
+        fname="$(basename "${f}")"
+        if ! rclone lsf "${REMOTE_NAME}:${REMOTE_PATH}/${fname}" >/dev/null 2>&1; then
+            unsynced=$(( unsynced + 1 ))
+        fi
+    done
+
+    if [ "${unsynced}" -gt 0 ]; then
+        warn "${unsynced} local backup(s) not yet synced"
+        log "Run: incusbox-cloud-sync push"
+    else
+        log "All local backups synced"
+    fi
+}
+
+# ── help / dispatch ───────────────────────────────────────────────────────────
+
+show_help() {
+    cat <<EOF
+incusbox-cloud-sync — sync container backups to cloud storage
+
+Usage:
+  incusbox-cloud-sync push   [filter]   Upload local backups to remote
+  incusbox-cloud-sync pull   [filter]   Download remote backups to local
+  incusbox-cloud-sync list              List remote backups
+  incusbox-cloud-sync config [type]     Configure remote storage
+  incusbox-cloud-sync status            Show sync status
+
+Options:
+  filter   Optional filename filter (e.g. container name)
+
+Environment:
+  INCUSBOX_CLOUD_REMOTE   rclone remote name (default: incusbox-backups)
+  INCUSBOX_CLOUD_PATH     Remote path (default: incusbox/backups)
+  INCUSBOX_BACKUP_DIR     Local backup directory
+
+Examples:
+  incusbox-cloud-sync config s3
+  incusbox-cloud-sync push
+  incusbox-cloud-sync push mybox
+  incusbox-cloud-sync pull
+  incusbox-cloud-sync list
+  incusbox-cloud-sync status
+EOF
+}
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    push)           cmd_push   "$@" ;;
+    pull)           cmd_pull   "$@" ;;
+    list|ls)        cmd_list ;;
+    config)         cmd_config "$@" ;;
+    status)         cmd_status ;;
+    -h|--help|help) show_help ;;
+    *)
+        printf >&2 "incusbox-cloud-sync: unknown subcommand '%s'\n" "${subcmd}"
+        printf >&2 "Run 'incusbox-cloud-sync --help' for usage.\n"
+        exit 1 ;;
+esac
