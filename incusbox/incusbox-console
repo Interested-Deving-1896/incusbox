@@ -1,0 +1,51 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-console: attach to a container console (serial or VGA).
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incusbox-console — attach to a container console
+
+Usage:
+  incusbox-console [OPTIONS] NAME
+
+Options:
+  --type TYPE   Console type: console (serial) or vga (default: console)
+  -h, --help    Show this help
+
+Press Ctrl-a q to detach from the console.
+
+Examples:
+  incusbox-console mybox
+  incusbox-console --type vga mybox
+EOF
+}
+
+console_type="console"
+name=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --type) console_type="$2"; shift 2 ;;
+        -h|--help) show_help; exit 0 ;;
+        -*) die "Unknown option: $1" ;;
+        *) name="$1"; shift ;;
+    esac
+done
+
+[ -z "${name}" ] && { show_help; exit 1; }
+
+require_incus
+
+log "Attaching to console of '${name}' (Ctrl-a q to detach) ..."
+exec ${INCUS} console --type "${console_type}" "${name}"

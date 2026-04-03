@@ -1,0 +1,68 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-restore: import a container from a backup archive.
+#
+# Uses 'incus import' to restore an archive produced by incusbox-backup.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incusbox-restore — import a container from a backup archive
+
+Usage:
+  incusbox-restore [OPTIONS] NAME
+
+Options:
+  -f, --from PATH   Archive to restore from (required)
+      --storage POOL  Incus storage pool to import into (default: Incus default)
+  -h, --help        Show this help
+
+The archive must have been created with 'incusbox backup' (incus export).
+The restored container will have the same name it had when backed up unless
+NAME is specified to override it.
+
+Examples:
+  incusbox-restore mybox --from /backups/mybox.tar.gz
+  incusbox-restore newname --from /backups/mybox.tar.gz
+  incusbox-restore mybox --from mybox-20240101-120000.tar.gz --storage tank
+EOF
+}
+
+name=""
+archive=""
+storage_pool=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -f|--from)      archive="$2"; shift 2 ;;
+        --storage)      storage_pool="$2"; shift 2 ;;
+        -h|--help)      show_help; exit 0 ;;
+        -*) die "Unknown option: $1" ;;
+        *) name="$1"; shift ;;
+    esac
+done
+
+[ -z "${archive}" ] && die "--from PATH is required"
+[ -f "${archive}" ] || die "Archive not found: ${archive}"
+
+require_incus
+
+import_args=""
+[ -n "${storage_pool}" ] && import_args="--storage ${storage_pool}"
+[ -n "${name}" ]         && import_args="${import_args} --name ${name}"
+
+log "Restoring container from '${archive}' ..."
+# shellcheck disable=SC2086
+${INCUS} import "${archive}" ${import_args}
+
+log "Restore complete."
+[ -n "${name}" ] && log "Container name: ${name}"

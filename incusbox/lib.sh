@@ -129,6 +129,10 @@ incusbox_doctor() {
     _chk_opt python3
     _chk_opt yq
 
+    printf '\nOptional commands:\n'
+    _chk_opt tar
+    _chk_opt gzip
+
     printf '\nIncus socket:\n'
     local _sock="${XDG_RUNTIME_DIR:-/run/user/$(id -ru)}/incus/incus.socket"
     if [ -S "${_sock}" ]; then

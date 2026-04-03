@@ -1,0 +1,67 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-backup: export an incusbox container to a portable archive.
+#
+# Uses 'incus export' which produces a tarball containing the container
+# rootfs and metadata. The archive can be imported with incusbox-restore.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incusbox-backup — export a container to a portable archive
+
+Usage:
+  incusbox-backup [OPTIONS] NAME
+
+Options:
+  -o, --output PATH   Output archive path (default: NAME-<timestamp>.tar.gz)
+      --optimized     Use storage-driver-optimised format (faster, less portable)
+  -h, --help          Show this help
+
+The archive is created with 'incus export' and can be restored with
+'incusbox restore NAME --from PATH'.
+
+Examples:
+  incusbox-backup mybox
+  incusbox-backup mybox --output /backups/mybox.tar.gz
+EOF
+}
+
+name=""
+output=""
+optimized=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o|--output)   output="$2"; shift 2 ;;
+        --optimized)   optimized=1; shift ;;
+        -h|--help)     show_help; exit 0 ;;
+        -*) die "Unknown option: $1" ;;
+        *) name="$1"; shift ;;
+    esac
+done
+
+[ -z "${name}" ] && { show_help; exit 1; }
+
+require_incus
+
+[ -z "${output}" ] && output="${name}-$(date +%Y%m%d-%H%M%S).tar.gz"
+
+log "Exporting container '${name}' to '${output}' ..."
+
+export_args=""
+[ "${optimized}" -eq 1 ] && export_args="--optimized-storage"
+
+# shellcheck disable=SC2086
+${INCUS} export "${name}" "${output}" ${export_args}
+
+log "Backup complete: ${output}"

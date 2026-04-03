@@ -91,6 +91,10 @@ incusbox-list
 incusbox-rm
 incusbox-stop
 incusbox-upgrade
+incusbox-snapshot
+incusbox-console
+incusbox-backup
+incusbox-restore
 incusbox-assemble
 incusbox-setup-rootless
 "

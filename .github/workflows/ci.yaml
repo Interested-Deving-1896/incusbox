@@ -79,6 +79,8 @@ jobs:
           for exe in incusbox incusbox-create incusbox-enter incusbox-init \
                      incusbox-export incusbox-host-exec incusbox-list \
                      incusbox-rm incusbox-stop incusbox-upgrade \
+                     incusbox-snapshot incusbox-console \
+                     incusbox-backup incusbox-restore \
                      incusbox-assemble incusbox-setup-rootless; do
             if [ -x "${HOME}/.local/bin/${exe}" ]; then
               echo "OK:   ~/.local/bin/${exe}"
