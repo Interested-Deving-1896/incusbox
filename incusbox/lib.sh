@@ -31,7 +31,7 @@ _incusbox_load_config() {
         "${HOME}/.incusboxrc"
     do
         # shellcheck disable=SC1090
-        [ -e "${_cf}" ] && . "$(realpath "${_cf}")"
+        if [ -e "${_cf}" ]; then . "$(realpath "${_cf}")"; fi
     done
 }
 _incusbox_load_config
