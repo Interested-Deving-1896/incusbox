@@ -1,27 +1,21 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-list: list incusbox containers
+# shellcheck disable=SC2034
 
 set -e
 
-[ -z "${USER}" ] && USER="$(id -run)"
-[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
 
 rootful=0
 verbose=0
 version="0.1.0"
 
-config_files="
-/usr/share/incusbox/incusbox.conf
-/usr/local/share/incusbox/incusbox.conf
-/etc/incusbox/incusbox.conf
-${XDG_CONFIG_HOME:-"${HOME}/.config"}/incusbox/incusbox.conf
-${HOME}/.incusboxrc
-"
-for _cf in ${config_files}; do
-    # shellcheck disable=SC1090
-    [ -e "${_cf}" ] && . "$(realpath "${_cf}")"
-done
+# (config loading provided by lib.sh)
 
 show_help() {
     cat <<EOF
@@ -48,19 +42,8 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-INCUS_USER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -ru)}/incus/incus.socket"
-if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
-    INCUS="sudo incus"
-    unset INCUS_SOCKET
-elif [ "$(id -ru)" -ne 0 ] && [ -S "${INCUS_USER_SOCKET}" ]; then
-    INCUS="incus"
-    export INCUS_SOCKET="${INCUS_USER_SOCKET}"
-else
-    INCUS="incus"
-    unset INCUS_SOCKET
-fi
-
-command -v incus >/dev/null 2>&1 || { printf >&2 'Error: incus not found\n'; exit 1; }
+resolve_incus
+require_incus
 
 # Print header
 printf '%-30s %-12s %-20s %-15s %s\n' \

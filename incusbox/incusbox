@@ -7,6 +7,13 @@ set -e
 
 version="0.1.0"
 
+# ── shared library ────────────────────────────────────────────────────────────
+_self="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_lib="$(dirname "${_self}")/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
 # ── locate script directory ───────────────────────────────────────────────────
 # Resolve symlinks so we find the real script directory even when incusbox
 # is invoked via a symlink in /usr/local/bin.
@@ -32,6 +39,10 @@ Commands:
   upgrade     Upgrade packages inside a container
   export      Export an app/binary/service from inside a container
   host-exec   Run a host command from inside a container
+
+  assemble        Create/update containers from a declarative YAML file
+  setup-rootless  Guided setup for rootless incusbox via incus-user
+  doctor          Check prerequisites and runtime environment
 
   version     Show version
   help        Show this help
@@ -97,6 +108,7 @@ case "${cmd}" in
     host-exec) run_subcommand host-exec "$@" ;;
 
     # Meta
+    doctor)               resolve_incus; incusbox_doctor ;;
     version|-V|--version) show_version ;;
     help|-h|--help)       show_help ;;
 

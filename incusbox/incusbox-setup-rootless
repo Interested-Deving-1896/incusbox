@@ -1,6 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-setup-rootless: guided setup for rootless incusbox via incus-user.
+# shellcheck disable=SC2034,SC2015
 #
 # Checks and configures:
 #   1. incus-user daemon (systemd user service)
@@ -13,8 +14,11 @@
 
 set -e
 
-[ -z "${USER}" ] && USER="$(id -run)"
-[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
 
 version="0.1.0"
 non_interactive=0

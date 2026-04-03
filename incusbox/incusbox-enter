@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # incusbox-enter: enter a running incusbox container
 # Replaces distrobox-enter; uses incus exec instead of docker/podman exec.
+# shellcheck disable=SC2034,SC2015,SC2016
 
 set -e
 
-[ -z "${USER}" ] && USER="$(id -run)"
-[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
-[ -z "${SHELL}" ] && SHELL="$(getent passwd "${USER}" | cut -d: -f7)"
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 container_name=""
@@ -22,23 +25,7 @@ version="0.1.0"
 # Timeout in seconds to wait for cloud-init / incusbox-init to complete
 init_timeout=120
 
-# ── config files ──────────────────────────────────────────────────────────────
-config_files="
-/usr/share/incusbox/incusbox.conf
-/usr/local/share/incusbox/incusbox.conf
-/etc/incusbox/incusbox.conf
-${XDG_CONFIG_HOME:-"${HOME}/.config"}/incusbox/incusbox.conf
-${HOME}/.incusboxrc
-"
-for _cf in ${config_files}; do
-    # shellcheck disable=SC1090
-    [ -e "${_cf}" ] && . "$(realpath "${_cf}")"
-done
-
-# ── helpers ───────────────────────────────────────────────────────────────────
-log()  { printf >&2 '%s\n' "$*"; }
-die()  { printf >&2 'Error: %s\n' "$*"; exit 1; }
-info() { [ "${verbose}" -eq 1 ] && printf >&2 '+ %s\n' "$*" || true; }
+# (config loading and helpers provided by lib.sh)
 
 show_help() {
     cat <<EOF
@@ -84,17 +71,7 @@ done
 [ -z "${container_name}" ] && die "Container name required. Usage: incusbox enter NAME"
 
 # ── incus binary (rootful vs rootless) ───────────────────────────────────────
-INCUS_USER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -ru)}/incus/incus.socket"
-if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
-    INCUS="sudo incus"
-    unset INCUS_SOCKET
-elif [ "$(id -ru)" -ne 0 ] && [ -S "${INCUS_USER_SOCKET}" ]; then
-    INCUS="incus"
-    export INCUS_SOCKET="${INCUS_USER_SOCKET}"
-else
-    INCUS="incus"
-    unset INCUS_SOCKET
-fi
+resolve_incus
 
 # ── container state helpers ───────────────────────────────────────────────────
 container_status() {
@@ -261,7 +238,7 @@ build_exec_cmd() {
 
 # ── main ──────────────────────────────────────────────────────────────────────
 main() {
-    command -v incus >/dev/null 2>&1 || die "'incus' not found in PATH"
+    require_incus
 
     # Read container metadata first so --dry-run and build_exec_cmd both have
     # correct values regardless of whether the container is running.

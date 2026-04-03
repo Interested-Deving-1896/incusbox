@@ -3,18 +3,22 @@
 # incusbox-create: create an incusbox container backed by Incus
 # Replaces distrobox-create; uses incus launch + cloud-init instead of
 # docker/podman run.
+# shellcheck disable=SC2034,SC2015,SC2086
 
 set -e
 
-[ -z "${USER}" ] && USER="$(id -run)"
-[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
-[ -z "${SHELL}" ] && SHELL="$(getent passwd "${USER}" | cut -d: -f7)"
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
 
 # ── defaults ────────────────────────────────────────────────────────────────
 container_image=""
 container_image_default="images:ubuntu/24.04/cloud"
 container_name=""
 container_name_default="my-incusbox"
+# shellcheck disable=SC2034
 container_hostname="$(uname -n)"
 container_user_home="${HOME}"
 container_user_name="${USER}"
@@ -44,27 +48,13 @@ unshare_groups=0
 non_interactive=0
 dryrun=0
 verbose=0
+# shellcheck disable=SC2034
 always_pull=0
+# shellcheck disable=SC2034
 nopasswd=0
 version="0.1.0"
 
-# ── config files ─────────────────────────────────────────────────────────────
-config_files="
-/usr/share/incusbox/incusbox.conf
-/usr/local/share/incusbox/incusbox.conf
-/etc/incusbox/incusbox.conf
-${XDG_CONFIG_HOME:-"${HOME}/.config"}/incusbox/incusbox.conf
-${HOME}/.incusboxrc
-"
-for _cf in ${config_files}; do
-    # shellcheck disable=SC1090
-    [ -e "${_cf}" ] && . "$(realpath "${_cf}")"
-done
-
-# ── helpers ──────────────────────────────────────────────────────────────────
-log()  { printf >&2 '%s\n' "$*"; }
-die()  { printf >&2 'Error: %s\n' "$*"; exit 1; }
-info() { [ "${verbose}" -eq 1 ] && printf >&2 '+ %s\n' "$*" || true; }
+# (config loading and helpers provided by lib.sh)
 
 show_help() {
     cat <<EOF
@@ -152,23 +142,7 @@ fi
 effective_home="${container_user_custom_home:-"${container_user_home}"}"
 
 # ── incus binary (rootful vs rootless) ───────────────────────────────────────
-# Rootless mode uses the incus-user per-user daemon socket. When the socket
-# exists we point INCUS_SOCKET at it so all incus calls use it automatically.
-# Rootful mode uses sudo when the caller is not already root.
-INCUS_USER_SOCKET="${XDG_RUNTIME_DIR:-/run/user/$(id -ru)}/incus/incus.socket"
-
-if [ "${rootful}" -eq 1 ] && [ "$(id -ru)" -ne 0 ]; then
-    INCUS="sudo incus"
-    unset INCUS_SOCKET
-elif [ "$(id -ru)" -ne 0 ] && [ -S "${INCUS_USER_SOCKET}" ]; then
-    # Rootless: use incus-user socket
-    INCUS="incus"
-    export INCUS_SOCKET="${INCUS_USER_SOCKET}"
-    info "Rootless mode: using incus-user socket ${INCUS_USER_SOCKET}"
-else
-    INCUS="incus"
-    unset INCUS_SOCKET
-fi
+resolve_incus
 
 # ── storage detection ─────────────────────────────────────────────────────────
 # Determine which Incus storage pool to use and what driver it runs on.
@@ -597,7 +571,7 @@ gid ${container_user_gid} ${container_user_gid}"
 # ── main ──────────────────────────────────────────────────────────────────────
 main() {
     # Check incus is available
-    command -v incus >/dev/null 2>&1 || die "'incus' not found in PATH"
+    require_incus
 
     # Register OCI remote if needed — Incus handles OCI pulls natively,
     # no external tool (skopeo etc.) required.

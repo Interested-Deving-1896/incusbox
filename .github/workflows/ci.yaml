@@ -17,7 +17,7 @@ jobs:
       - name: Check syntax of all incusbox scripts
         run: |
           failed=0
-          for f in incusbox/incusbox incusbox/incusbox-*; do
+          for f in incusbox/lib.sh incusbox/incusbox incusbox/incusbox-*; do
             [ -f "$f" ] || continue
             if bash -n "$f"; then
               echo "OK:   $f"
@@ -40,19 +40,20 @@ jobs:
       - name: Run shellcheck on all incusbox scripts
         run: |
           failed=0
-          for f in incusbox/incusbox incusbox/incusbox-*; do
+          for f in incusbox/lib.sh incusbox/incusbox incusbox/incusbox-*; do
             [ -f "$f" ] || continue
             # SC1090: can't follow non-constant source — expected (config files)
-            # SC1091: not following sourced file — expected (config files)
-            # SC2034: unused variable — some vars set for sourcing by config
+            # SC1091: not following sourced file — handled per-file with disable directives
             # SC2154: referenced but not assigned — vars come from sourced config
+            # SC3043: local in sh — scripts use bash shebang
+            # SC2034 is NOT globally excluded; per-file disable directives handle it
             # Use the shebang to determine shell dialect
             shell="bash"
             head -1 "$f" | grep -q '#!/bin/sh' && shell="sh"
             if shellcheck \
                 --shell="${shell}" \
                 --severity=warning \
-                --exclude=SC1090,SC1091,SC2034,SC2154,SC3043 \
+                --exclude=SC1090,SC1091,SC2154,SC3043 \
                 "$f"; then
               echo "OK:   $f"
             else

@@ -31,8 +31,11 @@
 
 set -e
 
-[ -z "${USER}" ] && USER="$(id -run)"
-[ -z "${HOME}" ] && HOME="$(getent passwd "${USER}" | cut -d: -f6)"
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
 
 version="0.1.0"
 assemble_file=""
@@ -41,10 +44,7 @@ dryrun=0
 verbose=0
 replace=0
 
-# ── helpers ───────────────────────────────────────────────────────────────────
-log()  { printf >&2 '%s\n' "$*"; }
-die()  { printf >&2 'Error: %s\n' "$*"; exit 1; }
-info() { [ "${verbose}" -eq 1 ] && printf >&2 '+ %s\n' "$*" || true; }
+# (helpers provided by lib.sh)
 
 show_help() {
     cat <<EOF

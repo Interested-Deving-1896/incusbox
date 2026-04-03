@@ -3,6 +3,7 @@
 # incusbox install script
 # Installs incusbox scripts, profiles, and data files.
 # Supports both system-wide (/usr/local) and user (~/.local) installs.
+# shellcheck disable=SC2015
 
 set -e
 
@@ -94,6 +95,17 @@ incusbox-assemble
 incusbox-setup-rootless
 "
 
+# lib.sh is sourced by all scripts at runtime; install to both bin_dir
+# (so scripts find it via dirname) and share_dir (fallback path).
+lib_src="${src_dir}/lib.sh"
+if [ -f "${lib_src}" ]; then
+    install -m 0644 "${lib_src}" "${bin_dir}/lib.sh"
+    install -m 0644 "${lib_src}" "${share_dir}/lib.sh"
+    info "Installed lib.sh"
+else
+    log "Warning: lib.sh not found in ${src_dir}"
+fi
+
 for exe in ${executables}; do
     src="${src_dir}/${exe}"
     if [ -f "${src}" ]; then
@@ -150,6 +162,9 @@ fi
 # when generating cloud-init user-data (the path may differ from bin_dir).
 install -m 0755 "${src_dir}/incusbox-init" "${share_dir}/incusbox-init"
 info "Installed ${share_dir}/incusbox-init"
+
+# lib.sh is already installed above; the share_dir copy is the fallback used
+# when scripts are invoked from a PATH location other than their source dir.
 
 # ── install profiles ──────────────────────────────────────────────────────────
 for profile_yaml in "${src_dir}"/profiles/*.yaml; do
