@@ -1,0 +1,283 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-winesapos: fetch, import, and launch winesapOS gaming VMs in Incus.
+#
+# winesapOS is an Arch Linux-based gaming OS (Steam Deck-compatible) distributed
+# as raw disk images. This script downloads the image, converts it to a format
+# Incus can import, and launches it as a virtual machine.
+#
+# References:
+#   https://github.com/winesapOS/winesapOS
+#   https://github.com/winesapOS/winesapOS/releases
+
+set -euo pipefail
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+
+WINESAPOS_VERSION="${INCUSBOX_WINESAPOS_VERSION:-4.5.0}"
+WINESAPOS_EDITION="${INCUSBOX_WINESAPOS_EDITION:-minimal}"   # minimal | performance | secure
+WINESAPOS_BUILD_DIR="${INCUSBOX_WINESAPOS_BUILD_DIR:-${HOME}/.local/share/incusbox/winesapos}"
+WINESAPOS_GITHUB_BASE="https://github.com/winesapOS/winesapOS/releases/download"
+WINESAPOS_DEFAULT_CPUS="${INCUSBOX_WINESAPOS_CPUS:-4}"
+WINESAPOS_DEFAULT_MEM="${INCUSBOX_WINESAPOS_MEMORY:-8192}"   # MiB
+WINESAPOS_DEFAULT_DISK="${INCUSBOX_WINESAPOS_DISK:-64GiB}"
+
+show_help() {
+    cat <<EOF
+incusbox-winesapos — fetch, import, and launch winesapOS gaming VMs
+
+Usage:
+  incusbox winesapos fetch   [VERSION] [--edition EDITION]
+  incusbox winesapos import  [VERSION] [--edition EDITION]
+  incusbox winesapos launch  NAME [--version VERSION] [--edition EDITION]
+                                  [--cpus N] [--memory MiB] [--disk SIZE]
+  incusbox winesapos list
+  incusbox winesapos versions
+
+Subcommands:
+  fetch    Download the winesapOS disk image (zst-compressed) from GitHub Releases
+  import   Import a fetched image into the Incus image store as a VM image
+  launch   Launch a winesapOS VM (fetches + imports automatically if needed)
+  list     List winesapOS VMs managed by incusbox
+  versions List available winesapOS releases from GitHub
+
+Defaults:
+  Version : ${WINESAPOS_VERSION}   (override: INCUSBOX_WINESAPOS_VERSION)
+  Edition : ${WINESAPOS_EDITION}   (override: INCUSBOX_WINESAPOS_EDITION)
+  CPUs    : ${WINESAPOS_DEFAULT_CPUS}         (override: INCUSBOX_WINESAPOS_CPUS)
+  Memory  : ${WINESAPOS_DEFAULT_MEM} MiB  (override: INCUSBOX_WINESAPOS_MEMORY)
+  Disk    : ${WINESAPOS_DEFAULT_DISK}     (override: INCUSBOX_WINESAPOS_DISK)
+
+Editions:
+  minimal      Minimal gaming environment (smallest image)
+  performance  Full gaming stack with performance tweaks
+  secure       Hardened build with security-focused defaults
+
+Options:
+  -h, --help    Show this help
+
+Examples:
+  incusbox winesapos fetch
+  incusbox winesapos fetch 4.5.0 --edition performance
+  incusbox winesapos import
+  incusbox winesapos launch my-gaming-vm
+  incusbox winesapos launch my-gaming-vm --cpus 8 --memory 16384
+  incusbox winesapos list
+  incusbox winesapos versions
+EOF
+}
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+_require_cmd() {
+    local cmd="$1" pkg="${2:-$1}"
+    command -v "${cmd}" >/dev/null 2>&1 || die "${cmd} is required. Install: apt install ${pkg}"
+}
+
+_image_filename() {
+    local version="$1" edition="$2"
+    printf 'winesapos-%s-%s.img.zst' "${version}" "${edition}"
+}
+
+_image_url() {
+    local version="$1" edition="$2"
+    printf '%s/%s/%s' \
+        "${WINESAPOS_GITHUB_BASE}" \
+        "${version}" \
+        "$(_image_filename "${version}" "${edition}")"
+}
+
+_image_alias() {
+    local version="$1" edition="$2"
+    printf 'winesapos/%s/%s' "${version}" "${edition}"
+}
+
+_image_exists() {
+    local alias="$1"
+    "${INCUS_CMD}" image list --format csv | grep -q "^${alias},"
+}
+
+# ── fetch ─────────────────────────────────────────────────────────────────────
+
+cmd_fetch() {
+    local version="${WINESAPOS_VERSION}" edition="${WINESAPOS_EDITION}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --edition|-e) edition="$2"; shift 2 ;;
+            --version|-v) version="$2"; shift 2 ;;
+            -*) die "Unknown option: $1" ;;
+            *)  version="$1"; shift ;;
+        esac
+    done
+
+    _require_cmd curl curl
+    _require_cmd zstd zstd
+
+    local filename url dest
+    filename="$(_image_filename "${version}" "${edition}")"
+    url="$(_image_url "${version}" "${edition}")"
+    dest="${WINESAPOS_BUILD_DIR}/${filename}"
+
+    mkdir -p "${WINESAPOS_BUILD_DIR}"
+
+    if [ -f "${dest%.zst}" ]; then
+        log "Already fetched: ${dest%.zst}"
+        return 0
+    fi
+
+    if [ ! -f "${dest}" ]; then
+        log "Downloading winesapOS ${version} (${edition})..."
+        log "  URL : ${url}"
+        log "  Dest: ${dest}"
+        curl --location --progress-bar --fail -o "${dest}" "${url}" \
+            || die "Download failed. Check version/edition at: https://github.com/winesapOS/winesapOS/releases"
+    else
+        log "Archive already downloaded: ${dest}"
+    fi
+
+    log "Decompressing ${filename}..."
+    zstd --decompress --rm "${dest}" -o "${dest%.zst}"
+    log "Image ready: ${dest%.zst}"
+}
+
+# ── import ────────────────────────────────────────────────────────────────────
+
+cmd_import() {
+    local version="${WINESAPOS_VERSION}" edition="${WINESAPOS_EDITION}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --edition|-e) edition="$2"; shift 2 ;;
+            --version|-v) version="$2"; shift 2 ;;
+            -*) die "Unknown option: $1" ;;
+            *)  version="$1"; shift ;;
+        esac
+    done
+
+    _require_cmd qemu-img qemu-utils
+
+    local img alias
+    img="${WINESAPOS_BUILD_DIR}/$(_image_filename "${version}" "${edition}" | sed 's/\.zst$//')"
+    alias="$(_image_alias "${version}" "${edition}")"
+
+    [ -f "${img}" ] || die "Image not found: ${img}. Run: incusbox winesapos fetch ${version} --edition ${edition}"
+
+    if _image_exists "${alias}"; then
+        log "Image already imported: ${alias}"
+        return 0
+    fi
+
+    log "Importing winesapOS ${version} (${edition}) into Incus..."
+    log "  Image : ${img}"
+    log "  Alias : ${alias}"
+
+    # winesapOS ships as a raw disk image. Incus VM images need a root disk
+    # in qcow2 format. Convert and import as a VM image.
+    local qcow2="${img%.img}.qcow2"
+    if [ ! -f "${qcow2}" ]; then
+        log "Converting raw image to qcow2..."
+        qemu-img convert -f raw -O qcow2 -p "${img}" "${qcow2}"
+    fi
+
+    "${INCUS_CMD}" image import "${qcow2}" \
+        --alias "${alias}" \
+        --type virtual-machine \
+        || die "Incus image import failed"
+
+    log "Imported: ${alias}"
+    log "Launch with: incusbox winesapos launch my-gaming-vm"
+}
+
+# ── launch ────────────────────────────────────────────────────────────────────
+
+cmd_launch() {
+    [ "$#" -ge 1 ] || die "Usage: incusbox winesapos launch NAME [options]"
+    local name="$1"; shift
+
+    local version="${WINESAPOS_VERSION}" edition="${WINESAPOS_EDITION}"
+    local cpus="${WINESAPOS_DEFAULT_CPUS}" memory="${WINESAPOS_DEFAULT_MEM}"
+    local disk="${WINESAPOS_DEFAULT_DISK}"
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --version|-v)  version="$2";  shift 2 ;;
+            --edition|-e)  edition="$2";  shift 2 ;;
+            --cpus|-c)     cpus="$2";     shift 2 ;;
+            --memory|-m)   memory="$2";   shift 2 ;;
+            --disk|-d)     disk="$2";     shift 2 ;;
+            -*) die "Unknown option: $1" ;;
+            *)  die "Unexpected argument: $1" ;;
+        esac
+    done
+
+    local alias
+    alias="$(_image_alias "${version}" "${edition}")"
+
+    # Auto-fetch and import if the image isn't in Incus yet
+    if ! _image_exists "${alias}"; then
+        log "Image '${alias}' not found — fetching and importing..."
+        cmd_fetch "${version}" --edition "${edition}"
+        cmd_import "${version}" --edition "${edition}"
+    fi
+
+    log "Launching winesapOS VM: ${name}"
+    log "  Image  : ${alias}"
+    log "  CPUs   : ${cpus}"
+    log "  Memory : ${memory} MiB"
+    log "  Disk   : ${disk}"
+
+    "${INCUS_CMD}" launch "${alias}" "${name}" \
+        --vm \
+        --config limits.cpu="${cpus}" \
+        --config limits.memory="${memory}MiB" \
+        --device root,size="${disk}"
+
+    log "VM launched: ${name}"
+    log "Console: incusbox console ${name}"
+    log "Stop   : incusbox stop ${name}"
+}
+
+# ── list ──────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    log "winesapOS VMs:"
+    "${INCUS_CMD}" list --format table \
+        | grep -i "winesapos" \
+        || log "  (none found — launch with: incusbox winesapos launch NAME)"
+}
+
+# ── versions ──────────────────────────────────────────────────────────────────
+
+cmd_versions() {
+    _require_cmd curl curl
+    log "Fetching winesapOS releases from GitHub..."
+    curl --silent --fail \
+        "https://api.github.com/repos/winesapOS/winesapOS/releases?per_page=10" \
+        | grep '"tag_name"' \
+        | sed 's/.*"tag_name": "\(.*\)".*/  \1/'
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    fetch)    cmd_fetch    "$@" ;;
+    import)   cmd_import   "$@" ;;
+    launch)   cmd_launch   "$@" ;;
+    list)     cmd_list ;;
+    versions) cmd_versions ;;
+    -h|--help|help) show_help ;;
+    *)
+        printf >&2 "incusbox-winesapos: unknown subcommand '%s'\n" "${subcmd}"
+        printf >&2 "Run 'incusbox winesapos --help' for usage.\n"
+        exit 1 ;;
+esac

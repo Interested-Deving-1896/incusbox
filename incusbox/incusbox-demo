@@ -1,0 +1,306 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-demo: manage a local incus-demo-server instance.
+#
+# incus-demo-server is a Go daemon that exposes a REST API for spinning up
+# short-lived, resource-capped Incus instances on demand — the backend behind
+# linuxcontainers.org/incus/try-it.  This script installs, configures, and
+# manages a self-hosted instance of that daemon against the local Incus socket.
+#
+# References:
+#   https://github.com/lxc/incus-demo-server
+#   https://linuxcontainers.org/incus/try-it
+
+set -euo pipefail
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+
+DEMO_DIR="${INCUSBOX_DEMO_DIR:-${HOME}/.local/share/incusbox/demo-server}"
+DEMO_BIN="${DEMO_DIR}/incus-demo-server"
+DEMO_CONFIG="${DEMO_DIR}/config.yaml"
+DEMO_PID="${DEMO_DIR}/demo-server.pid"
+DEMO_LOG="${DEMO_DIR}/demo-server.log"
+DEMO_API_ADDR="${INCUSBOX_DEMO_ADDR:-[::]:8080}"
+DEMO_EXPIRY="${INCUSBOX_DEMO_EXPIRY:-3600}"       # seconds; default 1 h
+DEMO_TOTAL_LIMIT="${INCUSBOX_DEMO_TOTAL:-10}"
+DEMO_IP_LIMIT="${INCUSBOX_DEMO_IP_LIMIT:-2}"
+DEMO_IMAGE="${INCUSBOX_DEMO_IMAGE:-ubuntu/24.04}"
+DEMO_TYPE="${INCUSBOX_DEMO_TYPE:-container}"
+DEMO_CPU="${INCUSBOX_DEMO_CPU:-1}"
+DEMO_MEMORY="${INCUSBOX_DEMO_MEMORY:-512MiB}"
+DEMO_DISK="${INCUSBOX_DEMO_DISK:-5GiB}"
+DEMO_PREALLOCATE="${INCUSBOX_DEMO_PREALLOCATE:-2}"
+DEMO_MODULE="github.com/lxc/incus-demo-server/cmd/incus-demo-server@latest"
+
+show_help() {
+    cat <<EOF
+incusbox-demo — manage a local incus-demo-server instance
+
+Usage:
+  incusbox demo install              Install the demo server binary (requires Go)
+  incusbox demo config [--edit]      Show or edit the generated config.yaml
+  incusbox demo start                Start the demo server in the background
+  incusbox demo stop                 Stop the running demo server
+  incusbox demo restart              Stop then start
+  incusbox demo status               Show whether the server is running
+  incusbox demo logs [--follow]      Show server logs
+  incusbox demo url                  Print the API base URL
+  incusbox demo test                 Smoke-test the running server via curl
+
+Configuration (environment overrides):
+  INCUSBOX_DEMO_DIR          Working directory  (default: ~/.local/share/incusbox/demo-server)
+  INCUSBOX_DEMO_ADDR         Listen address     (default: [::]:8080)
+  INCUSBOX_DEMO_EXPIRY       Instance TTL (s)   (default: 3600)
+  INCUSBOX_DEMO_TOTAL        Max total instances (default: 10)
+  INCUSBOX_DEMO_IP_LIMIT     Max per-IP instances (default: 2)
+  INCUSBOX_DEMO_IMAGE        Source image       (default: ubuntu/24.04)
+  INCUSBOX_DEMO_TYPE         container|virtual-machine (default: container)
+  INCUSBOX_DEMO_CPU          vCPU limit         (default: 1)
+  INCUSBOX_DEMO_MEMORY       Memory limit       (default: 512MiB)
+  INCUSBOX_DEMO_DISK         Disk limit         (default: 5GiB)
+  INCUSBOX_DEMO_PREALLOCATE  Warm pool size     (default: 2)
+
+Examples:
+  incusbox demo install
+  incusbox demo start
+  incusbox demo status
+  incusbox demo test
+  incusbox demo logs --follow
+  incusbox demo stop
+EOF
+}
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+_require_cmd() {
+    local cmd="$1" pkg="${2:-$1}"
+    command -v "${cmd}" >/dev/null 2>&1 || die "${cmd} is required. Install: ${pkg}"
+}
+
+_is_running() {
+    [ -f "${DEMO_PID}" ] && kill -0 "$(cat "${DEMO_PID}")" 2>/dev/null
+}
+
+_api_port() {
+    # Extract port from address like "[::]:8080" or "0.0.0.0:8080"
+    printf '%s' "${DEMO_API_ADDR}" | sed 's/.*://'
+}
+
+_api_url() {
+    printf 'http://localhost:%s' "$(_api_port)"
+}
+
+# ── install ───────────────────────────────────────────────────────────────────
+
+cmd_install() {
+    _require_cmd go "golang-go (or https://go.dev/dl/)"
+    mkdir -p "${DEMO_DIR}"
+    log "Installing incus-demo-server..."
+    GOBIN="${DEMO_DIR}" go install "${DEMO_MODULE}"
+    log "Installed: ${DEMO_BIN}"
+    log "Generate config with: incusbox demo config"
+}
+
+# ── config ────────────────────────────────────────────────────────────────────
+
+cmd_config() {
+    local edit=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --edit|-e) edit=1; shift ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    mkdir -p "${DEMO_DIR}"
+
+    if [ ! -f "${DEMO_CONFIG}" ]; then
+        _write_config
+        log "Config written: ${DEMO_CONFIG}"
+    fi
+
+    if [ "${edit}" -eq 1 ]; then
+        "${EDITOR:-vi}" "${DEMO_CONFIG}"
+        return
+    fi
+
+    cat "${DEMO_CONFIG}"
+}
+
+_write_config() {
+    cat > "${DEMO_CONFIG}" <<EOF
+server:
+  api:
+    address: "${DEMO_API_ADDR}"
+  limits:
+    total: ${DEMO_TOTAL_LIMIT}
+    ip: ${DEMO_IP_LIMIT}
+  terms: |
+    This is a local incusbox demo server.
+    Instances are temporary and will be deleted after ${DEMO_EXPIRY} seconds.
+
+incus:
+  instance:
+    allocate:
+      count: ${DEMO_PREALLOCATE}
+    expiry: ${DEMO_EXPIRY}
+    source:
+      image: "${DEMO_IMAGE}"
+      type: "${DEMO_TYPE}"
+    profiles:
+      - default
+    limits:
+      cpu: ${DEMO_CPU}
+      disk: ${DEMO_DISK}
+      memory: ${DEMO_MEMORY}
+  session:
+    command: ["bash"]
+    expiry: ${DEMO_EXPIRY}
+    console_only: true
+EOF
+}
+
+# ── start ─────────────────────────────────────────────────────────────────────
+
+cmd_start() {
+    [ -f "${DEMO_BIN}" ] || die "Demo server not installed. Run: incusbox demo install"
+    [ -f "${DEMO_CONFIG}" ] || { _write_config; log "Generated config: ${DEMO_CONFIG}"; }
+
+    if _is_running; then
+        log "Demo server already running (PID $(cat "${DEMO_PID}"))"
+        return 0
+    fi
+
+    mkdir -p "${DEMO_DIR}"
+    log "Starting incus-demo-server..."
+    log "  Config : ${DEMO_CONFIG}"
+    log "  Log    : ${DEMO_LOG}"
+    log "  API    : $(_api_url)"
+
+    # Run from DEMO_DIR so the server finds config.yaml in its working directory
+    ( cd "${DEMO_DIR}" && "${DEMO_BIN}" >> "${DEMO_LOG}" 2>&1 & echo $! > "${DEMO_PID}" )
+
+    sleep 1
+    if _is_running; then
+        log "Demo server started (PID $(cat "${DEMO_PID}"))"
+        log "Test with: incusbox demo test"
+    else
+        die "Demo server failed to start. Check logs: incusbox demo logs"
+    fi
+}
+
+# ── stop ──────────────────────────────────────────────────────────────────────
+
+cmd_stop() {
+    if ! _is_running; then
+        log "Demo server is not running"
+        return 0
+    fi
+    local pid
+    pid="$(cat "${DEMO_PID}")"
+    kill "${pid}"
+    rm -f "${DEMO_PID}"
+    log "Demo server stopped (was PID ${pid})"
+}
+
+# ── restart ───────────────────────────────────────────────────────────────────
+
+cmd_restart() {
+    cmd_stop
+    sleep 1
+    cmd_start
+}
+
+# ── status ────────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    if _is_running; then
+        log "Demo server: running (PID $(cat "${DEMO_PID}"))"
+        log "API URL    : $(_api_url)"
+        log "Config     : ${DEMO_CONFIG}"
+        log "Log        : ${DEMO_LOG}"
+    else
+        log "Demo server: stopped"
+    fi
+}
+
+# ── logs ──────────────────────────────────────────────────────────────────────
+
+cmd_logs() {
+    local follow=0
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --follow|-f) follow=1; shift ;;
+            *) die "Unknown option: $1" ;;
+        esac
+    done
+
+    [ -f "${DEMO_LOG}" ] || die "No log file found: ${DEMO_LOG}"
+
+    if [ "${follow}" -eq 1 ]; then
+        tail -f "${DEMO_LOG}"
+    else
+        cat "${DEMO_LOG}"
+    fi
+}
+
+# ── url ───────────────────────────────────────────────────────────────────────
+
+cmd_url() {
+    printf '%s\n' "$(_api_url)"
+}
+
+# ── test ──────────────────────────────────────────────────────────────────────
+
+cmd_test() {
+    _require_cmd curl curl
+    local url
+    url="$(_api_url)"
+
+    log "Testing demo server at ${url}..."
+
+    local status
+    status=$(curl --silent --fail --max-time 5 "${url}/1.0" 2>&1) \
+        || die "Server not responding at ${url}/1.0 — is it running? (incusbox demo start)"
+
+    log "  /1.0       : OK"
+
+    local terms
+    terms=$(curl --silent --fail --max-time 5 "${url}/1.0/terms" 2>&1) \
+        || die "Terms endpoint failed"
+    log "  /1.0/terms : OK"
+
+    log ""
+    log "Server is healthy."
+    log "Start a session: curl -X POST ${url}/1.0/start"
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    install)          cmd_install ;;
+    config)           cmd_config  "$@" ;;
+    start)            cmd_start ;;
+    stop)             cmd_stop ;;
+    restart)          cmd_restart ;;
+    status)           cmd_status ;;
+    logs)             cmd_logs "$@" ;;
+    url)              cmd_url ;;
+    test)             cmd_test ;;
+    -h|--help|help)   show_help ;;
+    *)
+        printf >&2 "incusbox-demo: unknown subcommand '%s'\n" "${subcmd}"
+        printf >&2 "Run 'incusbox demo --help' for usage.\n"
+        exit 1 ;;
+esac
