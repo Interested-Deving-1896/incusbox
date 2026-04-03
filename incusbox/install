@@ -95,6 +95,10 @@ incusbox-snapshot
 incusbox-console
 incusbox-backup
 incusbox-restore
+incusbox-publish
+incusbox-import
+incusbox-fleet
+incusbox-monitor
 incusbox-assemble
 incusbox-setup-rootless
 "

@@ -44,6 +44,10 @@ Commands:
   console         Attach to a container console (serial/VGA)
   backup          Export a container to a portable archive
   restore         Import a container from a backup archive
+  publish         Publish a container as a reusable Incus image
+  import          Import an Incus image from a file
+  fleet           Multi-container orchestration (start-all, stop-all, backup-all)
+  monitor         Show container resource usage and stats
 
   assemble        Create/update containers from a declarative YAML file
   setup-rootless  Guided setup for rootless incusbox via incus-user
@@ -109,11 +113,15 @@ case "${cmd}" in
     stop)      run_subcommand stop      "$@" ;;
     upgrade)   run_subcommand upgrade   "$@" ;;
 
-    # Snapshot / console / backup
+    # Snapshot / console / backup / image / fleet / monitor
     snapshot)       run_subcommand snapshot       "$@" ;;
     console)        run_subcommand console        "$@" ;;
     backup)         run_subcommand backup         "$@" ;;
     restore)        run_subcommand restore        "$@" ;;
+    publish)        run_subcommand publish        "$@" ;;
+    import)         run_subcommand import         "$@" ;;
+    fleet)          run_subcommand fleet          "$@" ;;
+    monitor)        run_subcommand monitor        "$@" ;;
 
     # Declarative config
     assemble)       run_subcommand assemble       "$@" ;;
