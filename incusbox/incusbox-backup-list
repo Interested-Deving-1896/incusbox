@@ -1,0 +1,62 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-backup-list: list container backup archives.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+BACKUP_DIR="${INCUSBOX_BACKUP_DIR:-${HOME}/.local/share/incusbox/backups}"
+
+show_help() {
+    cat <<EOF
+incusbox-backup-list — list container backup archives
+
+Usage:
+  incusbox-backup-list [DIR]
+
+Arguments:
+  DIR   Directory to list (default: \$INCUSBOX_BACKUP_DIR or
+        ~/.local/share/incusbox/backups)
+
+Options:
+  -h, --help   Show this help
+
+Examples:
+  incusbox backup-list
+  incusbox backup-list /backups
+EOF
+}
+
+[ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { show_help; exit 0; }
+[ -n "${1:-}" ] && BACKUP_DIR="$1"
+
+mkdir -p "${BACKUP_DIR}"
+
+log "Backups: ${BACKUP_DIR}"
+echo ""
+printf "  %-40s %-10s %s\n" "FILENAME" "SIZE" "DATE"
+printf "  %-40s %-10s %s\n" "--------" "----" "----"
+
+found=0
+for f in "${BACKUP_DIR}"/*.tar.gz "${BACKUP_DIR}"/*.tar; do
+    [ -f "${f}" ] || continue
+    found=1
+    size=$(stat -c%s "${f}" 2>/dev/null || stat -f%z "${f}" 2>/dev/null || echo 0)
+    date_str=$(stat -c%y "${f}" 2>/dev/null | cut -d. -f1 \
+             || stat -f%Sm "${f}" 2>/dev/null || echo "unknown")
+    # human-readable size
+    if   [ "${size}" -ge 1073741824 ]; then hr="$(( size / 1073741824 ))G"
+    elif [ "${size}" -ge 1048576    ]; then hr="$(( size / 1048576 ))M"
+    elif [ "${size}" -ge 1024       ]; then hr="$(( size / 1024 ))K"
+    else hr="${size}B"; fi
+    printf "  %-40s %-10s %s\n" "$(basename "${f}")" "${hr}" "${date_str}"
+done
+
+[ "${found}" -eq 0 ] && info "  No backups found in ${BACKUP_DIR}"
+echo ""
+info "Backup directory: ${BACKUP_DIR}"

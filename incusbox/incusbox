@@ -43,6 +43,8 @@ Commands:
   snapshot        Create, list, restore, delete, and auto-schedule snapshots
   console         Attach to a container console (serial/VGA)
   backup          Export a container to a portable archive
+  backup-list     List local backup archives
+  backup-delete   Delete a local backup archive
   restore         Import a container from a backup archive
   publish         Publish a container as a reusable Incus image
   import          Import an Incus image from a file
@@ -118,6 +120,8 @@ case "${cmd}" in
     snapshot)       run_subcommand snapshot       "$@" ;;
     console)        run_subcommand console        "$@" ;;
     backup)         run_subcommand backup         "$@" ;;
+    backup-list)    run_subcommand backup-list    "$@" ;;
+    backup-delete)  run_subcommand backup-delete  "$@" ;;
     restore)        run_subcommand restore        "$@" ;;
     publish)        run_subcommand publish        "$@" ;;
     import)         run_subcommand import         "$@" ;;

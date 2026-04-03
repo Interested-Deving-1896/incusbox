@@ -80,6 +80,7 @@ jobs:
                      incusbox-export incusbox-host-exec incusbox-list \
                      incusbox-rm incusbox-stop incusbox-upgrade \
                      incusbox-snapshot incusbox-snapshot-auto incusbox-console \
+                     incusbox-backup-list incusbox-backup-delete \
                      incusbox-backup incusbox-restore \
                      incusbox-publish incusbox-import \
                      incusbox-fleet incusbox-monitor incusbox-cloud-sync \

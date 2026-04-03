@@ -95,6 +95,8 @@ incusbox-snapshot
 incusbox-snapshot-auto
 incusbox-console
 incusbox-backup
+incusbox-backup-list
+incusbox-backup-delete
 incusbox-restore
 incusbox-publish
 incusbox-import

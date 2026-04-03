@@ -1,0 +1,66 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-backup-delete: delete a container backup archive.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+BACKUP_DIR="${INCUSBOX_BACKUP_DIR:-${HOME}/.local/share/incusbox/backups}"
+
+show_help() {
+    cat <<EOF
+incusbox-backup-delete — delete a container backup archive
+
+Usage:
+  incusbox-backup-delete NAME [--dir DIR]
+
+Arguments:
+  NAME   Filename (with or without extension) of the backup to delete.
+
+Options:
+  --dir DIR    Backup directory (default: \$INCUSBOX_BACKUP_DIR or
+               ~/.local/share/incusbox/backups)
+  -h, --help   Show this help
+
+Examples:
+  incusbox backup-delete mybox-20240101-120000.tar.gz
+  incusbox backup-delete mybox-20240101-120000
+  incusbox backup-delete mybox-20240101-120000 --dir /backups
+EOF
+}
+
+backup_name=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --dir)     BACKUP_DIR="$2"; shift 2 ;;
+        -h|--help) show_help; exit 0 ;;
+        -*) die "Unknown option: $1" ;;
+        *) backup_name="$1"; shift ;;
+    esac
+done
+
+[ -z "${backup_name}" ] && { show_help; exit 1; }
+
+backup_path="${BACKUP_DIR}/${backup_name}"
+
+# Try exact path first, then with common extensions
+if [ ! -f "${backup_path}" ]; then
+    for ext in .tar.gz .tar; do
+        if [ -f "${BACKUP_DIR}/${backup_name}${ext}" ]; then
+            backup_path="${BACKUP_DIR}/${backup_name}${ext}"
+            break
+        fi
+    done
+fi
+
+[ -f "${backup_path}" ] || die "Backup not found: ${backup_name} (looked in ${BACKUP_DIR})"
+
+log "Deleting: $(basename "${backup_path}")"
+rm -f "${backup_path}"
+log "Backup deleted"
