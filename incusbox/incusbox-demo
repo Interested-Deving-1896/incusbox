@@ -267,14 +267,12 @@ cmd_test() {
 
     log "Testing demo server at ${url}..."
 
-    local status
-    status=$(curl --silent --fail --max-time 5 "${url}/1.0" 2>&1) \
+    curl --silent --fail --max-time 5 "${url}/1.0" >/dev/null 2>&1 \
         || die "Server not responding at ${url}/1.0 — is it running? (incusbox demo start)"
 
     log "  /1.0       : OK"
 
-    local terms
-    terms=$(curl --silent --fail --max-time 5 "${url}/1.0/terms" 2>&1) \
+    curl --silent --fail --max-time 5 "${url}/1.0/terms" >/dev/null 2>&1 \
         || die "Terms endpoint failed"
     log "  /1.0/terms : OK"
 
