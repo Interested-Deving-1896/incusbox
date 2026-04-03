@@ -68,6 +68,7 @@ Commands:
   setup-rootless  Guided setup for rootless incusbox via incus-user
   update          Check for and install incusbox updates
   tui             Launch interactive terminal UI (requires dialog or whiptail)
+  dashboard       Launch web monitoring dashboard (requires socat/ncat/python3)
   doctor          Check prerequisites and runtime environment
 
   version     Show version
@@ -166,6 +167,7 @@ case "${cmd}" in
 
     # Meta
     tui)            run_subcommand tui            "$@" ;;
+    dashboard)      run_subcommand dashboard      "$@" ;;
     doctor)         run_subcommand doctor         "$@" ;;
     version|-V|--version) show_version ;;
     help|-h|--help)       show_help ;;
