@@ -40,6 +40,11 @@ Commands:
   export      Export an app/binary/service from inside a container
   host-exec   Run a host command from inside a container
 
+  snapshot        Create, list, restore, and delete container snapshots
+  console         Attach to a container console (serial/VGA)
+  backup          Export a container to a portable archive
+  restore         Import a container from a backup archive
+
   assemble        Create/update containers from a declarative YAML file
   setup-rootless  Guided setup for rootless incusbox via incus-user
   doctor          Check prerequisites and runtime environment
@@ -56,6 +61,11 @@ Examples:
   incusbox create --image docker:archlinux --name arch --storage-pool tank
   incusbox list
   incusbox rm mybox
+  incusbox snapshot create mybox before-upgrade
+  incusbox snapshot restore mybox before-upgrade
+  incusbox console mybox
+  incusbox backup mybox --output /tmp/mybox.tar.gz
+  incusbox restore mybox --from /tmp/mybox.tar.gz
 EOF
 }
 
@@ -98,6 +108,12 @@ case "${cmd}" in
     rm|remove) run_subcommand rm        "$@" ;;
     stop)      run_subcommand stop      "$@" ;;
     upgrade)   run_subcommand upgrade   "$@" ;;
+
+    # Snapshot / console / backup
+    snapshot)       run_subcommand snapshot       "$@" ;;
+    console)        run_subcommand console        "$@" ;;
+    backup)         run_subcommand backup         "$@" ;;
+    restore)        run_subcommand restore        "$@" ;;
 
     # Declarative config
     assemble)       run_subcommand assemble       "$@" ;;
