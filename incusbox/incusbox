@@ -40,7 +40,7 @@ Commands:
   export      Export an app/binary/service from inside a container
   host-exec   Run a host command from inside a container
 
-  snapshot        Create, list, restore, and delete container snapshots
+  snapshot        Create, list, restore, delete, and auto-schedule snapshots
   console         Attach to a container console (serial/VGA)
   backup          Export a container to a portable archive
   restore         Import a container from a backup archive

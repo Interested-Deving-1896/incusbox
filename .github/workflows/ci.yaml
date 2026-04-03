@@ -79,7 +79,7 @@ jobs:
           for exe in incusbox incusbox-create incusbox-enter incusbox-init \
                      incusbox-export incusbox-host-exec incusbox-list \
                      incusbox-rm incusbox-stop incusbox-upgrade \
-                     incusbox-snapshot incusbox-console \
+                     incusbox-snapshot incusbox-snapshot-auto incusbox-console \
                      incusbox-backup incusbox-restore \
                      incusbox-publish incusbox-import \
                      incusbox-fleet incusbox-monitor \

@@ -92,6 +92,7 @@ incusbox-rm
 incusbox-stop
 incusbox-upgrade
 incusbox-snapshot
+incusbox-snapshot-auto
 incusbox-console
 incusbox-backup
 incusbox-restore

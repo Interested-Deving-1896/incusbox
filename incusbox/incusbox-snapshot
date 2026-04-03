@@ -21,6 +21,7 @@ Usage:
   incusbox-snapshot list    NAME
   incusbox-snapshot restore NAME SNAPSHOT
   incusbox-snapshot delete  NAME SNAPSHOT
+  incusbox-snapshot auto    <set|show|disable> NAME [options]
 
 Subcommands:
   create   Take a snapshot of container NAME. SNAPSHOT defaults to
@@ -28,6 +29,8 @@ Subcommands:
   list     List all snapshots of container NAME.
   restore  Restore container NAME to snapshot SNAPSHOT.
   delete   Delete snapshot SNAPSHOT from container NAME.
+  auto     Manage automatic snapshot schedules (delegates to
+           incusbox-snapshot-auto).
 
 Options:
   -h, --help    Show this help
@@ -38,6 +41,9 @@ Examples:
   incusbox-snapshot list    mybox
   incusbox-snapshot restore mybox before-upgrade
   incusbox-snapshot delete  mybox before-upgrade
+  incusbox-snapshot auto set    mybox "@daily" --expiry 7d
+  incusbox-snapshot auto show   mybox
+  incusbox-snapshot auto disable mybox
 EOF
 }
 
@@ -94,6 +100,10 @@ case "${subcmd}" in
     list|ls) cmd_list    "$@" ;;
     restore) cmd_restore "$@" ;;
     delete|rm|remove) cmd_delete "$@" ;;
+    auto)
+        _auto_bin="$(dirname "$0")/incusbox-snapshot-auto"
+        [ -x "${_auto_bin}" ] || _auto_bin="incusbox-snapshot-auto"
+        exec "${_auto_bin}" "$@" ;;
     -h|--help|help) show_help ;;
     *)
         printf >&2 "incusbox-snapshot: unknown subcommand '%s'\n" "${subcmd}"

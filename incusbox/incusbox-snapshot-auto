@@ -1,0 +1,122 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-snapshot-auto: manage automatic snapshot schedules for incusbox containers.
+
+set -e
+
+# ── shared library ────────────────────────────────────────────────────────────
+_lib="$(cd "$(dirname "$0")" && pwd)/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    cat <<EOF
+incusbox-snapshot-auto — manage automatic snapshot schedules
+
+Usage:
+  incusbox-snapshot-auto set     NAME SCHEDULE [--expiry DURATION] [--pattern PATTERN]
+  incusbox-snapshot-auto show    NAME
+  incusbox-snapshot-auto disable NAME
+
+Subcommands:
+  set      Configure a cron-style schedule for automatic snapshots.
+           SCHEDULE accepts cron expressions or shorthand:
+             @hourly  @daily  @weekly  @monthly
+             "0 6 * * *"  (every day at 06:00)
+  show     Display the current schedule, expiry, and pattern.
+  disable  Remove the snapshot schedule (stops automatic snapshots).
+
+Options:
+  --expiry DURATION   Auto-delete snapshots after DURATION (e.g. 7d, 30d, 24h).
+  --pattern PATTERN   Naming pattern for auto-snapshots (default: snap-%d).
+                      %d is replaced by a counter.
+  -h, --help          Show this help.
+
+Examples:
+  incusbox-snapshot-auto set    mybox "@daily" --expiry 7d
+  incusbox-snapshot-auto set    mybox "0 6 * * *" --expiry 30d --pattern "auto-%d"
+  incusbox-snapshot-auto show   mybox
+  incusbox-snapshot-auto disable mybox
+EOF
+}
+
+# ── subcommands ───────────────────────────────────────────────────────────────
+
+cmd_set() {
+    local name="$1"
+    local schedule="$2"
+    [ -z "${name}" ] || [ -z "${schedule}" ] && { show_help; exit 1; }
+    shift 2
+
+    local expiry=""
+    local pattern="snap-%d"
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --expiry)  expiry="$2";  shift 2 ;;
+            --pattern) pattern="$2"; shift 2 ;;
+            *) printf >&2 "incusbox-snapshot-auto: unknown option '%s'\n" "$1"; exit 1 ;;
+        esac
+    done
+
+    require_incus
+
+    log "Setting snapshot schedule for '${name}': ${schedule}"
+    ${INCUS} config set "${name}" snapshots.schedule "${schedule}"
+    ${INCUS} config set "${name}" snapshots.pattern  "${pattern}"
+    ${INCUS} config set "${name}" snapshots.schedule.stopped false
+
+    if [ -n "${expiry}" ]; then
+        log "Setting snapshot expiry: ${expiry}"
+        ${INCUS} config set "${name}" snapshots.expiry "${expiry}"
+    fi
+
+    log "Auto-snapshot configured for '${name}'"
+    log "  Schedule : ${schedule}"
+    log "  Pattern  : ${pattern}"
+    [ -n "${expiry}" ] && log "  Expiry   : ${expiry}"
+}
+
+cmd_show() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    require_incus
+
+    local schedule expiry pattern
+    schedule=$(${INCUS} config get "${name}" snapshots.schedule  2>/dev/null || echo "(not set)")
+    expiry=$(${INCUS} config get   "${name}" snapshots.expiry    2>/dev/null || echo "(not set)")
+    pattern=$(${INCUS} config get  "${name}" snapshots.pattern   2>/dev/null || echo "(not set)")
+
+    printf "Container : %s\n" "${name}"
+    printf "Schedule  : %s\n" "${schedule}"
+    printf "Expiry    : %s\n" "${expiry}"
+    printf "Pattern   : %s\n" "${pattern}"
+}
+
+cmd_disable() {
+    local name="$1"
+    [ -z "${name}" ] && { show_help; exit 1; }
+    require_incus
+
+    ${INCUS} config unset "${name}" snapshots.schedule 2>/dev/null || true
+    log "Auto-snapshot disabled for '${name}'"
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+[ "$#" -eq 0 ] && { show_help; exit 0; }
+
+subcmd="$1"; shift
+case "${subcmd}" in
+    set)     cmd_set     "$@" ;;
+    show)    cmd_show    "$@" ;;
+    disable) cmd_disable "$@" ;;
+    -h|--help|help) show_help ;;
+    *)
+        printf >&2 "incusbox-snapshot-auto: unknown subcommand '%s'\n" "${subcmd}"
+        printf >&2 "Run 'incusbox-snapshot-auto --help' for usage.\n"
+        exit 1 ;;
+esac
