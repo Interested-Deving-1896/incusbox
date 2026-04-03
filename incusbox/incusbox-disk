@@ -1,0 +1,151 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-only
+# incusbox-disk — live disk resize for incusbox containers
+#
+# Resizes the root disk of a running or stopped container without
+# data loss. Incus handles the online resize for LVM/ZFS/Btrfs pools.
+#
+# Usage:
+#   incusbox disk resize <container> <size>
+#   incusbox disk info   <container>
+#
+# Subcommands:
+#   resize <ct> <size>   Resize the root disk (e.g. 20GB, +5GB)
+#   info   <ct>          Show current disk size and pool info
+#
+# Size formats:
+#   20GB     Set to exactly 20 GiB
+#   +5GB     Grow by 5 GiB
+#   100GB    Set to 100 GiB
+#
+# Examples:
+#   incusbox disk resize mybox 20GB
+#   incusbox disk resize mybox +10GB
+#   incusbox disk info mybox
+
+set -euo pipefail
+
+_self="$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "${_self}")"
+_lib="${_dir}/lib.sh"
+[ -f "${_lib}" ] || _lib="/usr/share/incusbox/lib.sh"
+# shellcheck source=lib.sh disable=SC1091
+. "${_lib}"
+
+resolve_incus
+
+show_help() {
+    sed -n '/^# Usage:/,/^[^#]/p' "$0" | grep '^#' | sed 's/^# \?//'
+    exit 0
+}
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+_require_ct() {
+    local ct="$1"
+    incus info "${ct}" &>/dev/null 2>&1 || die "Container not found: ${ct}"
+}
+
+_get_root_size() {
+    local ct="$1"
+    incus config device show "${ct}" 2>/dev/null \
+        | grep -A5 'root:' \
+        | grep 'size:' \
+        | awk '{print $2}' \
+        | head -1
+}
+
+_get_pool() {
+    local ct="$1"
+    incus config device show "${ct}" 2>/dev/null \
+        | grep -A5 'root:' \
+        | grep 'pool:' \
+        | awk '{print $2}' \
+        | head -1
+}
+
+# ── resize ────────────────────────────────────────────────────────────────────
+
+cmd_resize() {
+    local ct="${1:?Usage: incusbox disk resize <container> <size>}"
+    local new_size="${2:?Usage: incusbox disk resize <container> <size>}"
+
+    _require_ct "${ct}"
+
+    local current_size
+    current_size=$(_get_root_size "${ct}" || echo "unknown")
+    local pool
+    pool=$(_get_pool "${ct}" || echo "default")
+
+    log "Container : ${ct}"
+    log "Pool      : ${pool}"
+    log "Current   : ${current_size:-not set (pool default)}"
+    log "New size  : ${new_size}"
+    echo ""
+
+    # Validate size format
+    if ! echo "${new_size}" | grep -qE '^\+?[0-9]+(GB|GiB|MB|MiB|TB|TiB|KB|KiB)$'; then
+        die "Invalid size format: ${new_size}. Use e.g. 20GB, +5GB, 100GiB"
+    fi
+
+    # Incus uses GiB notation (GB = GiB in Incus config)
+    incus config device set "${ct}" root size "${new_size}"
+
+    local new_actual
+    new_actual=$(_get_root_size "${ct}" || echo "${new_size}")
+    ok "Root disk resized to ${new_actual}"
+    log ""
+    log "The filesystem inside the container will be expanded automatically"
+    log "by Incus on the next container start (or immediately if running)."
+    log "To verify inside the container: df -h /"
+}
+
+# ── info ──────────────────────────────────────────────────────────────────────
+
+cmd_info() {
+    local ct="${1:?Usage: incusbox disk info <container>}"
+    _require_ct "${ct}"
+
+    log "Disk info for container: ${ct}"
+    echo ""
+
+    local size pool
+    size=$(_get_root_size "${ct}" || echo "pool default")
+    pool=$(_get_pool "${ct}" || echo "default")
+
+    log "  Root disk size : ${size}"
+    log "  Storage pool   : ${pool}"
+    echo ""
+
+    # Show pool info
+    if [ -n "${pool}" ]; then
+        log "Pool details:"
+        incus storage show "${pool}" 2>/dev/null | grep -E 'name:|driver:|source:|size:' \
+            | sed 's/^/  /' || true
+        echo ""
+        log "Pool usage:"
+        incus storage info "${pool}" 2>/dev/null | grep -E 'used|total|free' \
+            | sed 's/^/  /' || true
+    fi
+
+    # Show live disk usage if container is running
+    local state
+    state=$(incus list --format csv -c s "${ct}" 2>/dev/null | head -1 || echo "")
+    if [ "${state}" = "RUNNING" ]; then
+        echo ""
+        log "Live filesystem usage (inside container):"
+        incus exec "${ct}" -- df -h / 2>/dev/null | sed 's/^/  /' || true
+    fi
+}
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+subcmd="${1:-help}"
+shift || true
+
+case "${subcmd}" in
+    resize) cmd_resize "$@" ;;
+    info)   cmd_info   "$@" ;;
+    help|--help|-h) show_help ;;
+    *) printf >&2 "Unknown subcommand: %s\nRun: incusbox disk help\n" "${subcmd}"; exit 1 ;;
+esac
