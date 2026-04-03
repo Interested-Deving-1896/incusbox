@@ -18,7 +18,8 @@ incusbox-usb — manage USB device passthrough for containers
 
 Usage:
   incusbox-usb list-host              List USB devices available on the host
-  incusbox-usb attach  NAME VID PID   Attach a USB device to a container
+  incusbox-usb attach  NAME VID PID   Attach a USB device (VID and PID separate)
+  incusbox-usb attach  NAME VID:PID   Attach a USB device (VID:PID shorthand)
   incusbox-usb detach  NAME DEV_NAME  Remove a USB device from a container
   incusbox-usb list    NAME           List USB devices attached to a container
 
@@ -35,6 +36,7 @@ Options:
 Examples:
   incusbox usb list-host
   incusbox usb attach  mybox 046d c52b
+  incusbox usb attach  mybox 046d:c52b
   incusbox usb list    mybox
   incusbox usb detach  mybox usb-046d-c52b
 EOF
@@ -79,9 +81,18 @@ cmd_list_host() {
 cmd_attach() {
     local name="$1"
     local vid="$2"
-    local pid="$3"
-    [ -z "${name}" ] || [ -z "${vid}" ] || [ -z "${pid}" ] && { show_help; exit 1; }
-    shift 3
+    local pid="${3:-}"
+    [ -z "${name}" ] || [ -z "${vid}" ] && { show_help; exit 1; }
+    # Support VID:PID as a single argument
+    if [ -z "${pid}" ] && printf '%s\n' "${vid}" | grep -q ':'; then
+        pid="${vid##*:}"
+        vid="${vid%%:*}"
+        shift 2
+    elif [ -n "${pid}" ]; then
+        shift 3
+    else
+        show_help; exit 1
+    fi
 
     local dev_name="usb-${vid}-${pid}"
     while [ "$#" -gt 0 ]; do

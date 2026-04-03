@@ -14,13 +14,16 @@ resolve_incus
 
 show_help() {
     cat <<EOF
-incusbox-net — manage network port forwarding for containers
+incusbox-net — manage networking for containers
 
 Usage:
-  incusbox-net forward  NAME HOST_PORT [CONTAINER_PORT] [--proto tcp|udp]
-  incusbox-net unforward NAME PROXY_NAME
-  incusbox-net list     NAME
-  incusbox-net status   NAME
+  incusbox net forward   NAME HOST_PORT [CONTAINER_PORT] [--proto tcp|udp]
+  incusbox net unforward NAME PROXY_NAME
+  incusbox net list      NAME
+  incusbox net status    NAME
+  incusbox net nic add   NAME NIC_NAME [--network BRIDGE] [--type TYPE]
+  incusbox net nic remove NAME NIC_NAME
+  incusbox net nic list  NAME
 
 Subcommands:
   forward     Add a proxy device to forward HOST_PORT → CONTAINER_PORT.
@@ -28,6 +31,7 @@ Subcommands:
   unforward   Remove a named proxy device.
   list        List all proxy (port-forward) devices on a container.
   status      Show network interfaces and proxy devices.
+  nic         Manage network interface (NIC) devices.
 
 Options:
   --proto tcp|udp   Protocol (default: tcp)
@@ -40,6 +44,9 @@ Examples:
   incusbox net list     mybox
   incusbox net unforward mybox fwd-8080
   incusbox net status   mybox
+  incusbox net nic add    mybox eth1 --network incusbr1
+  incusbox net nic remove mybox eth1
+  incusbox net nic list   mybox
 EOF
 }
 
@@ -147,6 +154,77 @@ cmd_status() {
     || info "  None"
 }
 
+# ── nic ───────────────────────────────────────────────────────────────────────
+
+cmd_nic() {
+    local subcmd="${1:-help}"; shift || true
+    case "${subcmd}" in
+        add)
+            local name="${1:?Usage: incusbox net nic add NAME NIC_NAME [--network BRIDGE] [--type TYPE]}"
+            local nic_name="${2:?Usage: incusbox net nic add NAME NIC_NAME [--network BRIDGE] [--type TYPE]}"
+            shift 2
+            local network="incusbr0"
+            local nic_type="bridged"
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    --network) network="$2"; shift 2 ;;
+                    --type)    nic_type="$2"; shift 2 ;;
+                    -*) die "Unknown option: $1" ;;
+                    *) die "Unexpected argument: $1" ;;
+                esac
+            done
+            require_incus
+            log "Adding NIC '${nic_name}' (${nic_type}, network=${network}) to '${name}' ..."
+            ${INCUS} config device add "${name}" "${nic_name}" nic \
+                "nictype=${nic_type}" "parent=${network}" "name=${nic_name}"
+            log "NIC added: ${nic_name} → ${network}"
+            ;;
+        remove|rm)
+            local name="${1:?Usage: incusbox net nic remove NAME NIC_NAME}"
+            local nic_name="${2:?Usage: incusbox net nic remove NAME NIC_NAME}"
+            require_incus
+            ${INCUS} config device remove "${name}" "${nic_name}"
+            log "NIC removed: ${nic_name} from '${name}'"
+            ;;
+        list|ls)
+            local name="${1:?Usage: incusbox net nic list NAME}"
+            require_incus
+            log "NIC devices on '${name}':"
+            echo ""
+            printf "  %-20s %-12s %s\n" "DEVICE" "TYPE" "NETWORK"
+            printf "  %-20s %-12s %s\n" "------" "----" "-------"
+            local found=false
+            while IFS= read -r dev; do
+                local dtype
+                dtype=$(${INCUS} config device get "${name}" "${dev}" nictype 2>/dev/null || echo "?")
+                local dnet
+                dnet=$(${INCUS} config device get "${name}" "${dev}" parent 2>/dev/null || echo "?")
+                found=true
+                printf "  %-20s %-12s %s\n" "${dev}" "${dtype}" "${dnet}"
+            done < <(${INCUS} config device list "${name}" 2>/dev/null \
+                     | grep "nic" | awk '{print $1}' || true)
+            if ! ${found}; then
+                log "  No NIC devices configured"
+            fi
+            ;;
+        help|--help|-h)
+            cat <<EOF
+Usage:
+  incusbox net nic add    NAME NIC_NAME [--network BRIDGE] [--type TYPE]
+  incusbox net nic remove NAME NIC_NAME
+  incusbox net nic list   NAME
+
+Options (add):
+  --network BRIDGE   Incus network bridge (default: incusbr0)
+  --type TYPE        NIC type: bridged|macvlan|ipvlan|p2p|routed (default: bridged)
+EOF
+            ;;
+        *)
+            printf >&2 "incusbox-net: unknown nic subcommand '%s'\n" "${subcmd}"
+            exit 1 ;;
+    esac
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 [ "$#" -eq 0 ] && { show_help; exit 0; }
@@ -157,6 +235,7 @@ case "${subcmd}" in
     unforward|unfwd|rm) cmd_unforward "$@" ;;
     list|ls)            cmd_list      "$@" ;;
     status)             cmd_status    "$@" ;;
+    nic)                cmd_nic       "$@" ;;
     -h|--help|help)     show_help ;;
     *)
         printf >&2 "incusbox-net: unknown subcommand '%s'\n" "${subcmd}"

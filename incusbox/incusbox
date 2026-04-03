@@ -42,6 +42,7 @@ Commands:
   upgrade     Upgrade packages inside a container
   export      Export an app/binary/service from inside a container
   host-exec   Run a host command from inside a container
+  completion  Generate shell completion script (bash|zsh|fish)
 
   snapshot        Create, list, restore, delete, and auto-schedule snapshots
   console         Attach to a container console (serial/VGA)
@@ -163,7 +164,8 @@ case "${cmd}" in
 
     # In-container commands (also callable from host for scripting)
     export)    run_subcommand export    "$@" ;;
-    host-exec) run_subcommand host-exec "$@" ;;
+    host-exec)  run_subcommand host-exec  "$@" ;;
+    completion) run_subcommand completion "$@" ;;
 
     # Meta
     tui)            run_subcommand tui            "$@" ;;
